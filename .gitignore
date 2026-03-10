@@ -1,0 +1,9 @@
+# Config (contains secrets)
+config.toml
+
+# Rust
+target/
+**/*.rs.bk
+
+# Logs
+*.log
