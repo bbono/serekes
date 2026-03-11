@@ -25,20 +25,16 @@
 │  No match → skip market, wait for expiry, rotate
 │
 ③ UPDATE SHARED MARKET
-│  Set strike_price (chainlink), initial orderbook mid prices
+│  Set strike_price (chainlink)
 │
-④ SPAWN POLYMARKET WS TASKS
-│  - Orderbook stream (up + down tokens)
-│  - Price stream (last_trade_price, best_bid, best_ask)
+④ SPAWN POLYMARKET PRICE WS TASK
+│  - Price stream (last_trade_price)
 │
-⑤ WAIT FOR ORDERBOOK
-│  Poll until both up.best_bid > 0 and down.best_bid > 0
-│
-⑥ TICK LOOP (1ms) — until market expires
+⑤ TICK LOOP (1ms) — until market expires
 │  → execute_tick() each iteration
 │
-⑦ CLEANUP
-│  Abort orderbook + price WS tasks
+⑥ CLEANUP
+│  Abort price WS task
 │  Clear traded_slugs
 │  Rotate to next market
 ```
@@ -131,7 +127,7 @@ On startup (and after each market expires):
 5. Fetches strike price from Binance kline API (candle open price)
 6. Looks up chainlink strike price from history (exact timestamp match with started_ms)
 7. Creates `Market` struct in `shared_market` with strike price and initial prices
-8. Subscribes to orderbook + price WebSocket streams for both tokens
+8. Subscribes to price WebSocket stream for both tokens
 
 ## Data Feeds
 
@@ -141,7 +137,6 @@ On startup (and after each market expires):
 | Coinbase price | `ticker` WS | `watch<(f64, i64)>` | ~1s |
 | Chainlink price | Polymarket live-data WS | `watch<(f64, i64)>` + history deque | on update |
 | Deribit DVOL | `deribit_volatility_index` WS | `watch<f64>` | ~5s |
-| Polymarket orderbook | SDK `subscribe_orderbook` | `Arc<Mutex<Option<Market>>>` | on update |
 | Polymarket prices | SDK `subscribe_prices` | `Arc<Mutex<Option<Market>>>` | on update |
 
 All feeds auto-reconnect on disconnect with exponential backoff (5s–60s).

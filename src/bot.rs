@@ -459,7 +459,7 @@ async fn main() {
             // === MARKET ROTATION LOOP ===
             loop {
                 // --- Discover market ---
-                let (up_id, down_id, slug, started_ms, expires_ms, strike, initial_price) = loop {
+                let (up_id, down_id, slug, started_ms, expires_ms, strike, _initial_price) = loop {
                     match fetch_active_market_id(&market_asset, interval_minutes).await {
                         Ok(result) => break result,
                         Err(e) => {
@@ -493,70 +493,10 @@ async fn main() {
                     let mut guard = shared_market.lock().unwrap_or_else(|e| e.into_inner());
                     let mut m = Market::new(slug.clone(), up_id.clone(), down_id.clone(), started_ms, expires_ms, strike);
                     m.strike_price = strike_price_chainlink;
-                    m.up.orderbook_mid_price = initial_price;
-                    m.down.orderbook_mid_price = 1.0 - initial_price;
                     *guard = Some(m);
                 }
 
-                // --- Spawn Polymarket WS tasks for this market ---
-                let ob_shared = shared_market.clone();
-                let ob_up = up_id.clone();
-                let ob_down = down_id.clone();
-                let ob_handle = tokio::spawn(async move {
-                    loop {
-                        let ws_client = PolyWsClient::default();
-                        let stream = match ws_client.subscribe_orderbook(vec![ob_up.clone(), ob_down.clone()]) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("[BOT] Polymarket WS subscribe error: {}. Retrying...", e);
-                                sleep(Duration::from_secs(5)).await;
-                                continue;
-                            }
-                        };
-
-                        println!("[BOT] Connected to Polymarket Orderbook WS");
-                        let mut stream = Box::pin(stream);
-
-                        while let Some(result) = stream.next().await {
-                            match result {
-                                Ok(book) => {
-                                    let mut guard = ob_shared.lock().unwrap_or_else(|e| e.into_inner());
-                                    if let Some(m) = guard.as_mut() {
-                                        if let Some(side) = m.side_by_token(&book.asset_id) {
-                                            let bids: Vec<(String, String)> = book
-                                                .bids
-                                                .iter()
-                                                .map(|l| (l.price.to_string(), l.size.to_string()))
-                                                .collect();
-                                            let asks: Vec<(String, String)> = book
-                                                .asks
-                                                .iter()
-                                                .map(|l| (l.price.to_string(), l.size.to_string()))
-                                                .collect();
-                                            side.orderbook.update(
-                                                if bids.is_empty() { None } else { Some(bids) },
-                                                if asks.is_empty() { None } else { Some(asks) },
-                                            );
-                                            if let (Some(bid), Some(ask)) =
-                                                (side.orderbook.best_bid(), side.orderbook.best_ask())
-                                            {
-                                                side.orderbook_mid_price = (bid + ask) / 2.0;
-                                                side.best_bid = bid;
-                                                side.best_ask = ask;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("[BOT] Polymarket WS error: {}. Reconnecting...", e);
-                                    break;
-                                }
-                            }
-                        }
-                        sleep(Duration::from_secs(2)).await;
-                    }
-                });
-
+                // --- Spawn Polymarket price WS task for this market ---
                 let price_shared = shared_market.clone();
                 let price_ids = vec![up_id.clone(), down_id.clone()];
                 let price_handle = tokio::spawn(async move {
@@ -584,18 +524,6 @@ async fn main() {
                                                 if price > 0.0 {
                                                     side.last_trade_price = price;
                                                 }
-                                                if let Some(bid) = entry.best_bid {
-                                                    let b: f64 = bid.to_string().parse().unwrap_or(0.0);
-                                                    if b > 0.0 {
-                                                        side.best_bid = b;
-                                                    }
-                                                }
-                                                if let Some(ask) = entry.best_ask {
-                                                    let a: f64 = ask.to_string().parse().unwrap_or(0.0);
-                                                    if a > 0.0 {
-                                                        side.best_ask = a;
-                                                    }
-                                                }
                                             }
                                         }
                                     }
@@ -612,17 +540,6 @@ async fn main() {
 
                 println!("[BOT] Market active: {} | Expires: {}ms", slug, expires_ms);
 
-                // --- Wait for Polymarket WS to populate orderbook ---
-                loop {
-                    let ready = {
-                        let guard = shared_market.lock().unwrap_or_else(|e| e.into_inner());
-                        guard.as_ref().map_or(false, |m| m.up.best_bid > 0.0 && m.down.best_bid > 0.0)
-                    };
-                    if ready { break; }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                println!("[BOT] Orderbook ready for {}", slug);
-
                 // --- Tick loop until market expires ---
                 loop {
                     if now_secs() * 1000 > expires_ms + 1000 {
@@ -633,7 +550,6 @@ async fn main() {
                 }
 
                 // --- Cleanup: abort market-specific tasks ---
-                ob_handle.abort();
                 price_handle.abort();
                 engine.traded_slugs.clear();
                 println!("[BOT] Market {} expired. Rotating...", slug);
