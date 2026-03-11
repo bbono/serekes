@@ -72,7 +72,7 @@ impl OrderParams {
 
 pub trait Strategy {
     /// Called each tick when idle. Return Some((direction, order)) to buy.
-    fn check_entry(&self, ctx: &TickContext, market: &Market, balance: f64) -> Option<(TokenDirection, OrderParams)>;
+    fn check_entry(&self, ctx: &TickContext, market: &Market) -> Option<(TokenDirection, OrderParams)>;
 
     /// Called each tick while holding a position.
     /// Return Some(OrderParams) to sell, None to keep holding.

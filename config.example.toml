@@ -1,31 +1,33 @@
 [wallet]
-# Polygon wallet private key used for signing Polymarket orders
+# Polygon wallet private key used for signing Polymarket orders (default: "")
 private_key = ""
-# Enable/disable live order execution. When false, bot runs in monitor-only mode
+# Enable/disable live order execution. When false, bot runs in monitor-only mode (default: false)
 trading_enabled = false
-# Polygon RPC endpoint for on-chain interactions
+# Polygon RPC endpoint for on-chain interactions (default: "https://polygon-rpc.com")
 polygon_rpc_url = "https://polygon-rpc.com"
 
 [market]
 # Asset to trade (used for Polymarket slug and Binance/Coinbase price feeds)
-# Supported: "btc", "eth", "sol", "xrp"
+# Supported: "btc", "eth", "sol", "xrp" (default: "btc")
 asset = "btc"
 # Candle interval in minutes. Supported values: 5 (5m), 15 (15m)
-# Determines which Polymarket up/down market to discover and the Binance kline interval
+# Determines which Polymarket up/down market to discover and the Binance kline interval (default: 5)
 interval_minutes = 5
 
 [engine]
+# USDC budget the bot is allowed to spend per trade (default: 3.0)
+budget = 3.0
 # Max allowed price divergence (%) between Coinbase and Binance before triggering killswitch
-# If exceeded, all trading activity is halted
+# If exceeded, all trading activity is halted (default: 50.0)
 exchange_divergence_threshold = 50.0
-# Minimum seconds between engine log outputs (supports decimals, e.g. 0.5)
-log_interval_secs = 1
+# Minimum seconds between engine log outputs, supports decimals (default: 0.5)
+log_interval_secs = 0.5
 
 # Strategy-specific config. Each strategy has its own section.
 [strategy.bono]
 
 [telegram]
-# Telegram bot token for sending notifications (from @BotFather)
+# Telegram bot token for sending notifications from @BotFather (default: "")
 bot_token = ""
-# Telegram chat ID to receive notifications
+# Telegram chat ID to receive notifications (default: "")
 chat_id = ""

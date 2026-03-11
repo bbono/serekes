@@ -66,6 +66,7 @@ impl OrderBook {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum TokenDirection {
     Up,
     Down,
@@ -102,6 +103,7 @@ pub struct Market {
     pub slug: String,
     pub started_at_ms: i64,
     pub expires_at_ms: i64,
+    pub strike_price_binance: f64,
     pub strike_price: f64,
     pub up: TokenSide,
     pub down: TokenSide,
@@ -109,12 +111,13 @@ pub struct Market {
 
 #[allow(dead_code)]
 impl Market {
-    pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64, strike_price: f64) -> Self {
+    pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64, strike_price_binance: f64) -> Self {
         Self {
             slug,
             started_at_ms,
             expires_at_ms,
-            strike_price,
+            strike_price_binance,
+            strike_price: 0.0,
             up: TokenSide::new(up_token_id),
             down: TokenSide::new(down_token_id),
         }

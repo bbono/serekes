@@ -22,7 +22,6 @@ impl Strategy for BonoStrategy {
         &self,
         _ctx: &TickContext,
         _market: &Market,
-        _balance: f64,
     ) -> Option<(TokenDirection, OrderParams)> {
         None
     }

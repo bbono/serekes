@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, Duration};
@@ -46,7 +47,7 @@ async fn fetch_active_market_id(
     asset: &str,
     interval_minutes: u32,
 ) -> Result<(String, String, String, i64, i64, f64, f64), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Fetching active {} market ID...", asset.to_uppercase());
+    println!("[BOT] Fetching active {} market...", asset.to_uppercase());
 
     let binance_symbol = format!("{}USDT", asset.to_uppercase());
     let interval_secs = (interval_minutes as i64) * 60;
@@ -66,7 +67,7 @@ async fn fetch_active_market_id(
 
     for ts in timestamps_to_check {
         let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts);
-        println!("Checking slug: {}", slug);
+        println!("[BOT] Checking slug: {}", slug);
 
         let request = gamma::types::request::EventBySlugRequest::builder()
             .slug(&slug)
@@ -85,7 +86,7 @@ async fn fetch_active_market_id(
                     "https://api.binance.com/api/v3/klines?symbol={}&interval={}&startTime={}&limit=1",
                     binance_symbol, kline_interval, ts * 1000
                 );
-                let strike_price = if let Ok(resp) = http_client.get(&kline_url).send().await {
+                let strike_price_binance = if let Ok(resp) = http_client.get(&kline_url).send().await {
                     if resp.status().is_success() {
                         let k_json: serde_json::Value = resp.json().await.unwrap_or_default();
                         k_json
@@ -127,7 +128,7 @@ async fn fetch_active_market_id(
 
                     if !up_token.is_empty() && !down_token.is_empty() && expires_at_ms > now_secs() * 1000 {
                         println!(
-                            "[SUCCESS] {} {}m Markets Found: UP: {} | DOWN: {}",
+                            "[BOT] {} {}m Markets Found: UP: {} | DOWN: {}",
                             asset.to_uppercase(),
                             interval_minutes,
                             up_token,
@@ -150,7 +151,7 @@ async fn fetch_active_market_id(
                             slug.clone(),
                             started_at_ms,
                             expires_at_ms,
-                            strike_price,
+                            strike_price_binance,
                             initial_price,
                         ));
                     }
@@ -213,7 +214,7 @@ async fn main() {
         loop {
             match connect_async(Url::parse(&binance_ws_url_clone).unwrap()).await {
                 Ok((ws_stream, _)) => {
-                    println!("[FEED] Connected to Binance WS");
+                    println!("[BOT] Connected to Binance WS");
                     let (_, mut read) = ws_stream.split();
                     while let Some(msg) = read.next().await {
                         if let Ok(Message::Text(text)) = msg {
@@ -229,7 +230,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[FEED] Binance WS Error: {}. Reconnecting...", e);
+                    eprintln!("[BOT] Binance WS Error: {}. Reconnecting...", e);
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -242,7 +243,7 @@ async fn main() {
         loop {
             match connect_async(Url::parse("wss://ws-feed.exchange.coinbase.com").unwrap()).await {
                 Ok((mut ws_stream, _)) => {
-                    println!("[FEED] Connected to Coinbase WS");
+                    println!("[BOT] Connected to Coinbase WS");
                     let sub = serde_json::json!({
                         "type": "subscribe",
                         "product_ids": [coinbase_product],
@@ -264,7 +265,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[FEED] Coinbase WS Error: {}. Reconnecting...", e);
+                    eprintln!("[BOT] Coinbase WS Error: {}. Reconnecting...", e);
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -277,7 +278,7 @@ async fn main() {
         loop {
             match connect_async(Url::parse("wss://www.deribit.com/ws/api/v2").unwrap()).await {
                 Ok((mut ws_stream, _)) => {
-                    println!("[FEED] Connected to Deribit DVOL WS");
+                    println!("[BOT] Connected to Deribit DVOL WS");
                     let subscribe_msg = serde_json::json!({
                         "jsonrpc": "2.0",
                         "method": "public/subscribe",
@@ -305,7 +306,7 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[FEED] Deribit WS Error: {}. Reconnecting...", e);
+                    eprintln!("[BOT] Deribit WS Error: {}. Reconnecting...", e);
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -313,12 +314,15 @@ async fn main() {
     });
 
     // --- CHAINLINK PRICE FEED (via Polymarket live-data WS) ---
+    let chainlink_history_max = (config.market.interval_minutes as usize) * 60;
+    let chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let chainlink_history_ws = chainlink_history.clone();
     let chainlink_asset = market_asset.clone();
     tokio::spawn(async move {
         loop {
             match connect_async(Url::parse("wss://ws-live-data.polymarket.com").unwrap()).await {
                 Ok((mut ws_stream, _)) => {
-                    println!("[FEED] Connected to Polymarket Chainlink WS");
+                    println!("[BOT] Connected to Polymarket Chainlink WS");
                     let sub = serde_json::json!({
                         "action": "subscribe",
                         "subscriptions": [{
@@ -337,13 +341,18 @@ async fn main() {
                                     json["payload"]["timestamp"].as_i64(),
                                 ) {
                                     let _ = chainlink_tx.send((price, ts));
+                                    let mut hist = chainlink_history_ws.lock().unwrap();
+                                    hist.push_back((price, ts));
+                                    if hist.len() > chainlink_history_max {
+                                        hist.pop_front();
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("[FEED] Chainlink WS Error: {}. Reconnecting...", e);
+                    eprintln!("[BOT] Chainlink WS Error: {}. Reconnecting...", e);
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -358,50 +367,26 @@ async fn main() {
                 let local_ts = now_secs();
                 let offset = server_ts - local_ts;
                 println!(
-                    "[TIME] Server: {} | Local: {} | Offset: {}s",
+                    "[BOT] Time Server: {} | Local: {} | Offset: {}s",
                     server_ts, local_ts, offset
                 );
                 if offset.abs() > 300 {
                     println!(
-                        "[WARN] Large time skew detected! Adjusting all auth timestamps by {}s",
+                        "[BOT] Large time skew detected! Adjusting all auth timestamps by {}s",
                         offset
                     );
                 }
                 offset
             }
             Err(e) => {
-                eprintln!("[WARN] Failed to sync time: {}. Defaulting to 0 offset.", e);
+                eprintln!("[BOT] Failed to sync time: {}. Defaulting to 0 offset.", e);
                 0
             }
         }
     };
 
-    // --- INITIALIZE REAL BALANCE IF TRADING ---
-    let mut initial_bal = 0.0;
-    if trading_enabled {
-        if let Some(pk) = &private_key {
-            use alloy_signer_local::LocalSigner;
-            use std::str::FromStr;
-            if let Ok(signer) = LocalSigner::from_str(pk) {
-                let addr = alloy_signer::Signer::address(&signer);
-                let addr_hex = format!("{:x}", addr);
-                if let Some(bal) = rpc_eth_call(
-                    &config.wallet.polygon_rpc_url,
-                    "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-                    &format!("0x70a08231000000000000000000000000{}", addr_hex),
-                )
-                .await
-                {
-                    initial_bal = bal;
-                    println!("[AUTH] Synced Real Balance: ${:.2}", initial_bal);
-                }
-            }
-        }
-    }
-
     telegram::init(config.telegram.clone());
 
-    let starting_balance = if trading_enabled { initial_bal } else { 3.0 };
     let strategy = BonoStrategy::new(config.strategy.bono.clone());
     let mut engine = StrategyEngine::new(
         strategy,
@@ -410,7 +395,6 @@ async fn main() {
         time_offset,
         config.wallet.polygon_rpc_url.clone(),
         config.engine.clone(),
-        starting_balance,
         binance_rx,
         coinbase_rx,
         chainlink_rx,
@@ -421,7 +405,7 @@ async fn main() {
     if trading_enabled {
         if let Some(pk) = private_key {
             if engine.initialize_client(&pk).await {
-                println!("[AUTH] Polymarket SDK Authenticated.");
+                println!("[BOT] Polymarket SDK Authenticated.");
             }
         }
     }
@@ -430,7 +414,7 @@ async fn main() {
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
-    println!("[BOT] Ready. Waiting for Binance feed...");
+    println!("[BOT] Ready. Waiting for asset price feeds...");
 
     tokio::select! {
         _ = async {
@@ -445,7 +429,7 @@ async fn main() {
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            println!("[FEED] All feeds ready.");
+            println!("[BOT] All feeds ready.");
 
             let interval_minutes = config.market.interval_minutes;
 
@@ -456,16 +440,34 @@ async fn main() {
                     match fetch_active_market_id(&market_asset, interval_minutes).await {
                         Ok(result) => break result,
                         Err(e) => {
-                            eprintln!("[MARKET] Discovery error: {}. Retrying...", e);
+                            eprintln!("[BOT] Market discovery error: {}. Retrying...", e);
                             sleep(Duration::from_secs(5)).await;
                         }
                     }
                 };
 
+                // --- Lookup strike price from chainlink history ---
+                let strike_price_chainlink = {
+                    let hist = chainlink_history.lock().unwrap();
+                    hist.iter()
+                        .find(|(_, ts)| *ts == started_ms)
+                        .map(|(price, _)| *price)
+                        .unwrap_or(0.0)
+                };
+                if strike_price_chainlink == 0.0 {
+                    let wait_secs = (expires_ms / 1000).saturating_sub(now_secs()).max(1) as u64;
+                    let interval_secs = (interval_minutes as u64) * 60;
+                    eprintln!("[BOT] No strike_price price for {}.", slug);
+                    if interval_secs - wait_secs > 10 {
+                        sleep(Duration::from_secs(wait_secs)).await;
+                    }
+                    continue;
+                }
                 // --- Update shared market ---
                 {
                     let mut guard = shared_market.lock().unwrap();
                     let mut m = Market::new(slug.clone(), up_id.clone(), down_id.clone(), started_ms, expires_ms, strike);
+                    m.strike_price = strike_price_chainlink;
                     m.up.orderbook_mid_price = initial_price;
                     m.down.orderbook_mid_price = 1.0 - initial_price;
                     *guard = Some(m);
@@ -481,13 +483,13 @@ async fn main() {
                         let stream = match ws_client.subscribe_orderbook(vec![ob_up.clone(), ob_down.clone()]) {
                             Ok(s) => s,
                             Err(e) => {
-                                eprintln!("[FEED] Polymarket WS subscribe error: {}. Retrying...", e);
+                                eprintln!("[BOT] Polymarket WS subscribe error: {}. Retrying...", e);
                                 sleep(Duration::from_secs(5)).await;
                                 continue;
                             }
                         };
 
-                        println!("[FEED] Connected to Polymarket Orderbook WS");
+                        println!("[BOT] Connected to Polymarket Orderbook WS");
                         let mut stream = Box::pin(stream);
 
                         while let Some(result) = stream.next().await {
@@ -521,7 +523,7 @@ async fn main() {
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("[FEED] Polymarket WS error: {}. Reconnecting...", e);
+                                    eprintln!("[BOT] Polymarket WS error: {}. Reconnecting...", e);
                                     break;
                                 }
                             }
@@ -538,12 +540,12 @@ async fn main() {
                         let stream = match ws_client.subscribe_prices(price_ids.clone()) {
                             Ok(s) => s,
                             Err(e) => {
-                                eprintln!("[PRICE] Subscribe error: {}. Retrying...", e);
+                                eprintln!("[BOT] Polymarket Chainlink WS subscribe error: {}. Retrying...", e);
                                 sleep(Duration::from_secs(5)).await;
                                 continue;
                             }
                         };
-                        println!("[FEED] Connected to Polymarket Price WS");
+                        println!("[BOT] Connected to Polymarket Price WS");
                         let mut stream = Box::pin(stream);
 
                         while let Some(result) = stream.next().await {
@@ -574,7 +576,7 @@ async fn main() {
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("[PRICE] WS error: {}. Reconnecting...", e);
+                                    eprintln!("[BOT] Polymarket Chainlink WS error: {}. Reconnecting...", e);
                                     break;
                                 }
                             }
@@ -583,7 +585,7 @@ async fn main() {
                     }
                 });
 
-                println!("[MARKET] Active: {} | Expires: {}ms", slug, expires_ms);
+                println!("[BOT] Market active: {} | Expires: {}ms", slug, expires_ms);
 
                 // --- Tick loop until market expires ---
                 loop {
@@ -600,14 +602,14 @@ async fn main() {
                 // --- Cleanup: abort market-specific tasks ---
                 ob_handle.abort();
                 price_handle.abort();
-                println!("[MARKET] {} expired. Rotating...", slug);
+                println!("[BOT] Market {} expired. Rotating...", slug);
             }
         } => {},
         _ = tokio::signal::ctrl_c() => {
-            println!("\n[SHUTDOWN] SIGINT received.");
+            println!("\n[BOT] SIGINT received.");
         },
         _ = sigterm.recv() => {
-            println!("\n[SHUTDOWN] SIGTERM received.");
+            println!("\n[BOT] SIGTERM received.");
         }
     }
 

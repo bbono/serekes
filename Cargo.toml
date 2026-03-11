@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 default-run = "serekes"
 
+[[bin]]
+name = "serekes"
+path = "src/bot.rs"
+
 [dependencies]
 tokio = { version = "1.28", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

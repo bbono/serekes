@@ -52,6 +52,8 @@ impl Default for MarketConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct EngineConfig {
+    #[serde(default = "default_budget")]
+    pub budget: f64,
     #[serde(default = "default_killswitch")]
     pub exchange_divergence_threshold: f64,
     #[serde(default = "default_log_interval")]
@@ -61,6 +63,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            budget: default_budget(),
             exchange_divergence_threshold: default_killswitch(),
             log_interval_secs: default_log_interval(),
         }
@@ -93,8 +96,9 @@ impl Default for TelegramConfig {
 fn default_rpc_url() -> String { "https://polygon-rpc.com".to_string() }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
+fn default_budget() -> f64 { 3.0 }
 fn default_killswitch() -> f64 { 50.0 }
-fn default_log_interval() -> f64 { 1.0 }
+fn default_log_interval() -> f64 { 0.5 }
 
 impl AppConfig {
     pub fn load(path: &str) -> Self {

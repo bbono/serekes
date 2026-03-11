@@ -1,1 +1,17 @@
-4. Can we resolve price to beat - it resolves but wrong pub strike_price: f64, // The "Open" price of the 5m candle
+
+let settlement = match direction {
+                                TokenDirection::Up => {
+                                    if binance_price > market.strike_price_binance {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                                TokenDirection::Down => {
+                                    if binance_price <= market.strike_price_binance {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                            };

@@ -68,7 +68,6 @@ pub struct StrategyEngine<S: Strategy> {
     pub active_direction: Option<TokenDirection>,
     pub entry_price: f64,
     pub position_size: f64,
-    pub balance: f64,
     pub pending_since: i64,
 
     // Loop counters
@@ -92,7 +91,6 @@ impl<S: Strategy> StrategyEngine<S> {
         time_offset: i64,
         polygon_rpc_url: String,
         engine_config: EngineConfig,
-        balance: f64,
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
         chainlink_rx: watch::Receiver<(f64, i64)>,
@@ -113,7 +111,6 @@ impl<S: Strategy> StrategyEngine<S> {
             active_direction: None,
             entry_price: 0.0,
             position_size: 0.0,
-            balance,
             pending_since: 0,
             last_oracle_log: 0,
             last_recon_ms: 0,
@@ -126,7 +123,12 @@ impl<S: Strategy> StrategyEngine<S> {
         }
     }
 
-    pub async fn execute_tick(&mut self, (binance_price, binance_ts): (f64, i64), (coinbase_price, coinbase_ts): (f64, i64), (chainlink_price, chainlink_ts): (f64, i64)) {
+    pub async fn execute_tick(
+        &mut self,
+        (binance_price, binance_ts): (f64, i64),
+        (coinbase_price, coinbase_ts): (f64, i64),
+        (chainlink_price, chainlink_ts): (f64, i64),
+    ) {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -134,7 +136,6 @@ impl<S: Strategy> StrategyEngine<S> {
             + (self.time_offset * 1000);
         let now_sec = now_ms / 1000;
         let dvol = *self.dvol_rx.borrow();
-        let active_dvol = dvol;
         let market = self.shared_market.lock().unwrap().clone();
 
         let exchange_divergence = (binance_price - coinbase_price).abs();
@@ -145,15 +146,20 @@ impl<S: Strategy> StrategyEngine<S> {
             && binance_price > 0.0
         {
             if now_sec % 5 == 0 {
-                println!("[KILLSWITCH] Market De-Peg! Binance: ${:.2} | Coinbase: ${:.2} | Divergence: ${:.2}",
+                println!("[ENGINE] Killswitch - Market De-Peg! Binance: ${:.2} | Coinbase: ${:.2} | Divergence: ${:.2}",
                     binance_price, coinbase_price, exchange_divergence);
             }
             return;
         }
 
         // STATE MACHINE LOCK CHECK & TIMEOUT
-        if matches!(self.state, EngineState::PendingBuy | EngineState::PendingSell) {
-            if self.trading_enabled && (now_ms - self.last_recon_ms > 2000 || now_ms - self.pending_since > 5000) {
+        if matches!(
+            self.state,
+            EngineState::PendingBuy | EngineState::PendingSell
+        ) {
+            if self.trading_enabled
+                && (now_ms - self.last_recon_ms > 2000 || now_ms - self.pending_since > 5000)
+            {
                 self.last_recon_ms = now_ms;
                 self.reconcile_with_chain().await;
             }
@@ -172,25 +178,29 @@ impl<S: Strategy> StrategyEngine<S> {
                             let direction = self.active_direction.unwrap_or(TokenDirection::Up);
                             let settlement = match direction {
                                 TokenDirection::Up => {
-                                    if binance_price > market.strike_price { 1.0 } else { 0.0 }
+                                    if binance_price > market.strike_price_binance {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    }
                                 }
                                 TokenDirection::Down => {
-                                    if binance_price <= market.strike_price { 1.0 } else { 0.0 }
+                                    if binance_price <= market.strike_price_binance {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    }
                                 }
                             };
 
                             let pnl = (settlement - self.entry_price) * self.position_size;
-                            println!("[EXPIRY] Settled at ${:.2} | PnL: ${:.4}", settlement, pnl);
+                            println!("[ENGINE] Settled at ${:.2} | PnL: ${:.4}", settlement, pnl);
 
                             if settlement > 0.5 {
-                                let msg = format!("WIN! Balance: ${:.2}", self.balance + pnl);
+                                let msg = format!("WIN! PnL: ${:.4}", pnl);
                                 telegram::send_alert(&msg);
                             } else {
                                 telegram::send_alert("LOSS. Position expired OTM.");
-                            }
-
-                            if !self.trading_enabled {
-                                self.balance += pnl;
                             }
 
                             self.state = EngineState::Idle;
@@ -212,7 +222,9 @@ impl<S: Strategy> StrategyEngine<S> {
                             dvol,
                             now_ms,
                         };
-                        if let Some(order) = self.strategy.check_exit(&ctx, market, self.position_size) {
+                        if let Some(order) =
+                            self.strategy.check_exit(&ctx, market, self.position_size)
+                        {
                             self.execute_sell(&token_id, &order).await;
                             return;
                         }
@@ -241,12 +253,13 @@ impl<S: Strategy> StrategyEngine<S> {
                         now_ms,
                     };
 
-                    if let Some((direction, order)) = self.strategy.check_entry(&ctx, market, self.balance) {
+                    if let Some((direction, order)) = self.strategy.check_entry(&ctx, market) {
                         let token_id = match direction {
                             TokenDirection::Up => market.up.token_id.clone(),
                             TokenDirection::Down => market.down.token_id.clone(),
                         };
-                        self.execute_buy(&token_id, direction, &market.slug, &order).await;
+                        self.execute_buy(&token_id, direction, &market.slug, &order)
+                            .await;
                     }
                 }
             }
@@ -255,13 +268,17 @@ impl<S: Strategy> StrategyEngine<S> {
         let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
         if now_ms - self.last_oracle_log >= log_interval_ms {
             self.last_oracle_log = now_ms;
-            let market_slug = market.as_ref().map(|m| m.slug.as_str()).unwrap_or("-");
-            println!("[ENGINE] {:?} | Bal ${:.2} | {} ${:.2} | DVOL {:.1} | {}",
-                self.state, self.balance, self.asset.to_uppercase(), binance_price, active_dvol, market_slug);
+            println!("[ENGINE] {:?}", self.state);
         }
     }
 
-    async fn execute_buy(&mut self, token_id: &str, direction: TokenDirection, slug: &str, order: &OrderParams) {
+    async fn execute_buy(
+        &mut self,
+        token_id: &str,
+        direction: TokenDirection,
+        slug: &str,
+        order: &OrderParams,
+    ) {
         let (entry_price, size) = order.price_and_size();
 
         if self.trading_enabled {
@@ -278,7 +295,7 @@ impl<S: Strategy> StrategyEngine<S> {
 
             if self.sign_and_submit(token_id, order, Side::Buy).await {
                 self.traded_slugs.insert(slug.to_string());
-                println!("[PROD] Buy Order Submitted: {}@${:.4}", size, entry_price);
+                println!("[ENGINE] Buy Order Submitted: {}@${:.4}", size, entry_price);
                 let msg = format!("TRADE PLACED! {} @ ${:.4}", self.asset, entry_price);
                 telegram::send_alert(&msg);
             } else {
@@ -296,7 +313,7 @@ impl<S: Strategy> StrategyEngine<S> {
             self.active_token_id = Some(token_id.to_string());
             self.active_direction = Some(direction);
             self.traded_slugs.insert(slug.to_string());
-            println!("[SIM] Entry at ${:.4}", entry_price);
+            println!("[ENGINE] Simulated Entry at ${:.4}", entry_price);
             let msg = format!("TRADE PLACED! {} @ ${:.4}", self.asset, entry_price);
             telegram::send_alert(&msg);
         }
@@ -313,20 +330,19 @@ impl<S: Strategy> StrategyEngine<S> {
                 .as_millis() as i64
                 + (self.time_offset * 1000);
             if self.sign_and_submit(token_id, order, Side::Sell).await {
-                println!("[PROD] Sell Order Submitted: {}@${:.4}", size, sell_price);
+                println!("[ENGINE] Sell Order Submitted: {}@${:.4}", size, sell_price);
             } else {
-                println!("[PROD] Sell failed. Reverting to InPosition.");
+                println!("[ENGINE] Sell failed. Reverting to InPosition.");
                 self.state = EngineState::InPosition;
                 self.pending_since = 0;
             }
         } else {
             let pnl = (sell_price - self.entry_price) * size;
-            self.balance += pnl;
             self.state = EngineState::Idle;
             self.position_size = 0.0;
             self.active_token_id = None;
             self.active_direction = None;
-            println!("[SIM] Exit at ${:.4} | PnL: ${:.4}", sell_price, pnl);
+            println!("[ENGINE] Simulated exit at ${:.4} | PnL: ${:.4}", sell_price, pnl);
         }
     }
 
@@ -383,7 +399,7 @@ impl<S: Strategy> StrategyEngine<S> {
         if let Ok(order) = signable {
             if let Ok(signed_order) = client.sign(signer, order).await {
                 if let Ok(resp) = client.post_order(signed_order).await {
-                    println!("[PROD] Order Submitted! ID: {:?}", resp.order_id);
+                    println!("[ENGINE] Order Submitted! ID: {:?}", resp.order_id);
                     return true;
                 }
             }
@@ -393,7 +409,6 @@ impl<S: Strategy> StrategyEngine<S> {
 
     pub async fn reconcile_with_chain(&mut self) {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            let usdc_fut = self.check_usdc_balance();
             let position_fut = async {
                 if let Some(ref token_id) = self.active_token_id {
                     return self.check_on_chain_position(token_id).await;
@@ -401,14 +416,7 @@ impl<S: Strategy> StrategyEngine<S> {
                 None
             };
 
-            let (usdc_result, position_result) = tokio::join!(usdc_fut, position_fut);
-
-            if let Some(usdc_bal) = usdc_result {
-                if (self.balance - usdc_bal).abs() > 0.05 {
-                    println!("[RECON] Syncing Capital: USDC ${:.2}", usdc_bal);
-                    self.balance = usdc_bal;
-                }
-            }
+            let position_result = position_fut.await;
 
             if self.active_token_id.is_some() {
                 if let Some(on_chain_shares) = position_result {
@@ -420,12 +428,12 @@ impl<S: Strategy> StrategyEngine<S> {
 
                     if self.state == EngineState::PendingBuy {
                         if on_chain_shares > 0.01 {
-                            println!("[RECON] Buy confirmed on-chain.");
+                            println!("[ENGINE] Buy confirmed on-chain.");
                             self.state = EngineState::InPosition;
                             self.position_size = on_chain_shares;
                             self.pending_since = 0;
                         } else if now_ms - self.pending_since > 5000 {
-                            println!("[RECON] Buy failed/timeout. Reverting to Idle.");
+                            println!("[ENGINE] Buy failed/timeout. Reverting to Idle.");
                             self.state = EngineState::Idle;
                             self.active_token_id = None;
                             self.active_direction = None;
@@ -435,8 +443,8 @@ impl<S: Strategy> StrategyEngine<S> {
                         }
                     } else if self.state == EngineState::PendingSell {
                         if on_chain_shares < 0.01 {
-                            println!("[RECON] Sell confirmed on-chain.");
-                            let msg = format!("Sold. Balance: ${:.2}", self.balance);
+                            println!("[ENGINE] Sell confirmed on-chain.");
+                            let msg = "Sold.".to_string();
                             telegram::send_alert(&msg);
                             self.state = EngineState::Idle;
                             self.active_token_id = None;
@@ -445,14 +453,14 @@ impl<S: Strategy> StrategyEngine<S> {
                             self.position_size = 0.0;
                             self.pending_since = 0;
                         } else if now_ms - self.pending_since > 5000 {
-                            println!("[RECON] Sell failed/timeout. Reverting to InPosition.");
+                            println!("[ENGINE] Sell failed/timeout. Reverting to InPosition.");
                             self.state = EngineState::InPosition;
                             self.position_size = on_chain_shares;
                             self.pending_since = 0;
                         }
                     } else if (on_chain_shares - self.position_size).abs() > 0.01 {
                         println!(
-                            "[RECON] Share drift detected. Engine: {:.2}, Chain: {:.2}",
+                            "[ENGINE] Share drift detected. Engine: {:.2}, Chain: {:.2}",
                             self.position_size, on_chain_shares
                         );
                         self.position_size = on_chain_shares;
@@ -472,25 +480,15 @@ impl<S: Strategy> StrategyEngine<S> {
         .await;
     }
 
-    async fn check_usdc_balance(&self) -> Option<f64> {
-        let signer = self.signer_instance.as_ref()?;
-        let addr = alloy_signer::Signer::address(signer);
-        let addr_hex = format!("{:x}", addr);
-        let data = format!("0x70a08231000000000000000000000000{}", addr_hex);
-        crate::rpc_eth_call(
-            &self.polygon_rpc_url,
-            "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-            &data,
-        )
-        .await
-    }
-
     async fn check_on_chain_position(&self, token_id: &str) -> Option<f64> {
         let signer = self.signer_instance.as_ref()?;
         let addr = alloy_signer::Signer::address(signer);
         let addr_hex = format!("{:x}", addr);
         let hex_token = decimal_to_hex256(token_id)?;
-        let data = format!("0x00fdd58e000000000000000000000000{}{}", addr_hex, hex_token);
+        let data = format!(
+            "0x00fdd58e000000000000000000000000{}{}",
+            addr_hex, hex_token
+        );
         crate::rpc_eth_call(
             &self.polygon_rpc_url,
             "0x4D97d6599A46602052E175369CeBa61a5b8cae6a",
@@ -517,7 +515,7 @@ impl<S: Strategy> StrategyEngine<S> {
                 true
             }
             Err(e) => {
-                eprintln!("[SDK] Auth failed: {}", e);
+                eprintln!("[ENGINE] SDK Auth failed: {}", e);
                 false
             }
         }
