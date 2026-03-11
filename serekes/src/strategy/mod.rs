@@ -1,9 +1,15 @@
+mod traits;
+pub mod gap_arb;
+
+pub use traits::{Strategy, TickContext, ExitReason, OrderParams};
+pub use gap_arb::GapArbStrategy;
+
 use crate::types::{Market, TokenDirection};
 use crate::config::StrategyConfig;
 use crate::telegram;
 use ethers::prelude::*;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
-use polymarket_client_sdk::clob::types::Side;
+use polymarket_client_sdk::clob::types::{Side, Amount};
 use polymarket_client_sdk::types::Decimal;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Signer as SDKSigner, Normal};
@@ -19,7 +25,8 @@ use crate::state::{PersistentState, BotState};
 use crate::atr::AtrMonitor;
 use crate::velocity::VelocityLockout;
 
-pub struct StrategyEngine {
+pub struct StrategyEngine<S: Strategy> {
+    pub strategy: S,
     pub trading_enabled: bool,
     pub asset: String,
     pub time_offset: i64,
@@ -45,8 +52,9 @@ pub struct StrategyEngine {
     pub market_id_rx: watch::Receiver<Option<String>>,
 }
 
-impl StrategyEngine {
+impl<S: Strategy> StrategyEngine<S> {
     pub async fn new(
+        strategy: S,
         trading_enabled: bool,
         asset: String,
         time_offset: i64,
@@ -63,6 +71,7 @@ impl StrategyEngine {
         let velocity = VelocityLockout::new(0.0003, 2);
 
         Self {
+            strategy,
             trading_enabled,
             asset,
             time_offset,
@@ -93,6 +102,7 @@ impl StrategyEngine {
 
         let exchange_divergence = (binance_price - coinbase_price).abs();
 
+        // KILLSWITCH
         if exchange_divergence > self.strategy_config.killswitch_threshold && coinbase_price > 0.0 && binance_price > 0.0 {
             if now_sec % 5 == 0 {
                 println!("[KILLSWITCH] Market De-Peg! Binance: ${:.2} | Coinbase: ${:.2} | Divergence: ${:.2}",
@@ -101,7 +111,7 @@ impl StrategyEngine {
             return;
         }
 
-        // 1. STATE MACHINE LOCK CHECK & TIMEOUT
+        // STATE MACHINE LOCK CHECK & TIMEOUT
         if matches!(self.state.state, BotState::PendingBuy | BotState::PendingSell) {
             if now_ms - self.last_recon_ms > 2000 || now_ms - self.state.pending_since > 5000 {
                 self.last_recon_ms = now_ms;
@@ -110,22 +120,21 @@ impl StrategyEngine {
             return;
         }
 
-        // 2. EMERGENCY EXITS (Wobble Defense)
+        // EMERGENCY EXITS
         if self.state.state == BotState::InPosition {
-            if let Some(market_id) = &self.state.active_market_id {
+            if let Some(market_id) = &self.state.active_market_id.clone() {
                 if let Some(market) = markets.get(market_id) {
-                    let time_to_expiry = market.expiration - (now_ms / 1000);
-                    let gap = (binance_price - market.strike_price).abs();
-                    let coinbase_crash = coinbase_price > 0.0 && binance_price > 0.0 && (coinbase_price - binance_price).abs() > (binance_price * self.strategy_config.divergence_exit_pct / 100.0);
-                    let gap_collapse = gap < (binance_price * 0.0006) && time_to_expiry <= 10;
-
-                    if coinbase_crash || gap_collapse {
-                        let reason = if coinbase_crash { "COINBASE WHALE DUMP" } else { "GAP COLLAPSE" };
-                        println!("[EXIT] EMERGENCY EJECT: {}", reason);
+                    // Engine-level: exchange divergence exit
+                    let divergence_exit = coinbase_price > 0.0 && binance_price > 0.0
+                        && (coinbase_price - binance_price).abs() > (binance_price * self.strategy_config.divergence_exit_pct / 100.0);
+                    if divergence_exit {
+                        println!("[EXIT] EMERGENCY EJECT: EXCHANGE DIVERGENCE");
                         self.emergency_sell(market).await;
                         return;
                     }
 
+                    // Engine-level: expiry settlement
+                    let time_to_expiry = market.expiration - (now_ms / 1000);
                     if time_to_expiry <= 0 {
                         let settlement = if market.direction == TokenDirection::Up {
                             if binance_price > market.strike_price { 1.0 } else { 0.0 }
@@ -154,6 +163,23 @@ impl StrategyEngine {
                         self.state.save();
                         return;
                     }
+
+                    // Strategy-level exits
+                    let ctx = TickContext {
+                        binance_price,
+                        coinbase_price,
+                        dvol,
+                        now_ms,
+                    };
+
+                    match self.strategy.check_exit(&ctx, market) {
+                        Some(ExitReason::Emergency(reason)) => {
+                            println!("[EXIT] EMERGENCY EJECT: {}", reason);
+                            self.emergency_sell(market).await;
+                            return;
+                        }
+                        None => {}
+                    }
                 }
             }
 
@@ -166,29 +192,31 @@ impl StrategyEngine {
         self.atr.update_from_tick(binance_price, now_ms / 1000);
         self.velocity.update(binance_price);
 
-        // 3. ENTRY MATRIX
+        // ENTRY MATRIX
         if self.state.state == BotState::Idle {
+            if self.velocity.is_locked() { return; }
+
+            let ctx = TickContext {
+                binance_price,
+                coinbase_price,
+                dvol,
+                now_ms,
+            };
+
             for market in markets.values() {
                 if self.traded_markets.contains(&market.id) { continue; }
-                let time_to_expiry = market.expiration - (now_ms / 1000);
-                if time_to_expiry <= 4 || time_to_expiry > 20 { continue; }
-                if self.velocity.is_locked() { continue; }
 
+                // Platform guards
                 let mkt_price = market.last_price;
                 if mkt_price < 0.01 || mkt_price > 0.99 { continue; }
-
                 let bid = market.orderbook.best_bid().unwrap_or(0.0);
                 let ask = market.orderbook.best_ask().unwrap_or(1.0);
-                let spread = (ask - bid).abs();
-                if spread > self.strategy_config.max_spread { continue; }
+                if (ask - bid).abs() > self.strategy_config.max_spread { continue; }
 
-                let gap = (binance_price - market.strike_price).abs();
-
-                if gap > (binance_price * 0.005) && time_to_expiry <= 20 {
-                    self.execute_buy(market, mkt_price).await;
+                if let Some(order) = self.strategy.check_entry(&ctx, market, self.state.simulated_balance) {
+                    self.execute_buy(market, &order).await;
                     break;
                 }
-
             }
         }
 
@@ -215,22 +243,21 @@ impl StrategyEngine {
         }
     }
 
-    async fn execute_buy(&mut self, market: &Market, limit_price: f64) {
-        let size = (self.state.simulated_balance / limit_price * 100.0).floor() / 100.0;
-        if size < 5.2 { return; }
+    async fn execute_buy(&mut self, market: &Market, order: &OrderParams) {
+        let (entry_price, size) = order.price_and_size();
 
         if self.trading_enabled {
             self.state.state = BotState::PendingBuy;
             self.state.active_market_id = Some(market.id.clone());
             self.state.pending_since = Utc::now().timestamp_millis() + (self.time_offset * 1000);
-            self.state.entry_price = limit_price;
+            self.state.entry_price = entry_price;
             self.state.position_size = size;
             self.state.save();
 
-            if self.sign_and_submit(market, limit_price, size, Side::Buy).await {
+            if self.sign_and_submit(market, order, Side::Buy).await {
                 self.traded_markets.insert(market.id.clone());
-                println!("[PROD] Buy Order Submitted: {}@${:.4}", size, limit_price);
-                let msg = format!("TRADE PLACED! {} @ ${:.4}", self.asset, limit_price);
+                println!("[PROD] Buy Order Submitted: {}@${:.4}", size, entry_price);
+                let msg = format!("TRADE PLACED! {} @ ${:.4}", self.asset, entry_price);
                 telegram::send_alert(&msg);
             } else {
                 self.state.state = BotState::Idle;
@@ -243,27 +270,28 @@ impl StrategyEngine {
         } else {
             self.state.state = BotState::InPosition;
             self.state.position_size = size;
-            self.state.entry_price = limit_price;
+            self.state.entry_price = entry_price;
             self.state.active_market_id = Some(market.id.clone());
             self.traded_markets.insert(market.id.clone());
             self.state.save();
-            println!("[SIM] Entry at ${:.4}", limit_price);
-            let msg = format!("TRADE PLACED! {} @ ${:.4}", self.asset, limit_price);
+            println!("[SIM] Entry at ${:.4}", entry_price);
+            let msg = format!("TRADE PLACED! {} @ ${:.4}", self.asset, entry_price);
             telegram::send_alert(&msg);
         }
     }
 
     async fn emergency_sell(&mut self, market: &Market) {
-        let size = (self.state.position_size * 100.0).floor() / 100.0;
-        if size < 5.0 { return; }
-
-        let sell_price = (market.orderbook.best_bid().unwrap_or(market.last_price) - 0.15).max(0.01);
+        let order = match self.strategy.sell_order(market, self.state.position_size) {
+            Some(o) => o,
+            None => return,
+        };
+        let (sell_price, size) = order.price_and_size();
 
         if self.trading_enabled {
             self.state.state = BotState::PendingSell;
             self.state.pending_since = Utc::now().timestamp_millis() + (self.time_offset * 1000);
             self.state.save();
-            if !self.sign_and_submit(market, sell_price, size, Side::Sell).await {
+            if !self.sign_and_submit(market, &order, Side::Sell).await {
                 println!("[PROD] Emergency sell failed. Reverting to InPosition.");
                 self.state.state = BotState::InPosition;
                 self.state.pending_since = 0;
@@ -280,27 +308,51 @@ impl StrategyEngine {
         }
     }
 
-    pub async fn sign_and_submit(&mut self, market: &Market, price: f64, size: f64, side: Side) -> bool {
-         if let (Some(ref client), Some(ref signer)) = (&self.client, &self.signer_instance) {
-             let price_str = format!("{:.2}", price);
-             let size_str = format!("{:.2}", size);
-             let price_dec = Decimal::from_str(&price_str).unwrap_or(Decimal::ZERO);
-             let size_dec = Decimal::from_str(&size_str).unwrap_or(Decimal::ZERO);
+    async fn sign_and_submit(&self, market: &Market, order: &OrderParams, side: Side) -> bool {
+        let (Some(ref client), Some(ref signer)) = (&self.client, &self.signer_instance) else {
+            return false;
+        };
 
-             if price_dec <= Decimal::ZERO || size_dec <= Decimal::ZERO { return false; }
+        let signable = match order {
+            OrderParams::Limit { price, size } => {
+                let price_dec = Decimal::from_str(&format!("{:.2}", price)).unwrap_or(Decimal::ZERO);
+                let size_dec = Decimal::from_str(&format!("{:.2}", size)).unwrap_or(Decimal::ZERO);
+                if price_dec <= Decimal::ZERO || size_dec <= Decimal::ZERO { return false; }
 
-             let order_builder = client.limit_order()
-                .token_id(&market.id)
-                .price(price_dec)
-                .size(size_dec)
-                .side(side);
+                client.limit_order()
+                    .token_id(&market.id)
+                    .price(price_dec)
+                    .size(size_dec)
+                    .side(side)
+                    .build().await
+            }
+            OrderParams::Market { amount } => {
+                let amount_dec = Decimal::from_str(&format!("{:.2}", amount)).unwrap_or(Decimal::ZERO);
+                if amount_dec <= Decimal::ZERO { return false; }
 
-            if let Ok(order) = order_builder.build().await {
-                if let Ok(signed_order) = client.sign(signer, order).await {
-                    if let Ok(resp) = client.post_order(signed_order).await {
-                        println!("[PROD] Order Submitted! ID: {:?}", resp.order_id);
-                        return true;
-                    }
+                let amt = if side == Side::Buy {
+                    Amount::usdc(amount_dec)
+                } else {
+                    Amount::shares(amount_dec)
+                };
+                let amt = match amt {
+                    Ok(a) => a,
+                    Err(_) => return false,
+                };
+
+                client.market_order()
+                    .token_id(&market.id)
+                    .amount(amt)
+                    .side(side)
+                    .build().await
+            }
+        };
+
+        if let Ok(order) = signable {
+            if let Ok(signed_order) = client.sign(signer, order).await {
+                if let Ok(resp) = client.post_order(signed_order).await {
+                    println!("[PROD] Order Submitted! ID: {:?}", resp.order_id);
+                    return true;
                 }
             }
         }
@@ -309,7 +361,6 @@ impl StrategyEngine {
 
     pub async fn reconcile_with_chain(&mut self) {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            // Prepare both RPC calls concurrently
             let usdc_fut = self.check_usdc_balance();
             let position_fut = async {
                 if let Some(market_id) = self.state.active_market_id.clone() {

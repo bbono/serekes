@@ -19,7 +19,7 @@ mod velocity;
 mod config;
 mod telegram;
 
-use crate::strategy::StrategyEngine;
+use crate::strategy::{StrategyEngine, GapArbStrategy};
 use crate::config::AppConfig;
 use tokio::sync::watch;
 
@@ -404,7 +404,9 @@ async fn main() {
 
     telegram::init(config.telegram.clone());
 
+    let gap_strategy = GapArbStrategy::default();
     let mut strategy = StrategyEngine::new(
+        gap_strategy,
         config.wallet.trading_enabled,
         market_asset.clone(),
         time_offset,
