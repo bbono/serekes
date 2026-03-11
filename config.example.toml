@@ -1,0 +1,31 @@
+[wallet]
+# Polygon wallet private key used for signing Polymarket orders
+private_key = ""
+# Enable/disable live order execution. When false, bot runs in monitor-only mode
+trading_enabled = false
+# Polygon RPC endpoint for on-chain interactions
+polygon_rpc_url = "https://polygon-rpc.com"
+
+[market]
+# Asset to trade (used for Polymarket slug and Binance/Coinbase price feeds)
+# Supported: "btc", "eth", "sol", "xrp"
+asset = "btc"
+# Candle interval in minutes. Supported values: 5 (5m), 15 (15m)
+# Determines which Polymarket up/down market to discover and the Binance kline interval
+interval_minutes = 5
+
+[engine]
+# Max allowed price divergence (%) between Coinbase and Binance before triggering killswitch
+# If exceeded, all trading activity is halted
+exchange_divergence_threshold = 50.0
+# Minimum seconds between engine log outputs (supports decimals, e.g. 0.5)
+log_interval_secs = 1
+
+# Strategy-specific config. Each strategy has its own section.
+[strategy.bono]
+
+[telegram]
+# Telegram bot token for sending notifications (from @BotFather)
+bot_token = ""
+# Telegram chat ID to receive notifications
+chat_id = ""

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBook {
-    pub bids: Vec<(String, String)>, // Price, Size (Strings to avoid precision issues in raw json)
+    pub bids: Vec<(String, String)>,
     pub asks: Vec<(String, String)>,
 }
 
@@ -21,7 +21,6 @@ impl OrderBook {
         }
     }
 
-    // Helper to get best bid/ask as f64
     pub fn best_bid(&self) -> Option<f64> {
         self.bids.first().and_then(|(p, _)| p.parse::<f64>().ok())
     }
@@ -30,11 +29,9 @@ impl OrderBook {
         self.asks.first().and_then(|(p, _)| p.parse::<f64>().ok())
     }
 
-    // Update processes deltas properly
     pub fn update(&mut self, bids: Option<Vec<(String, String)>>, asks: Option<Vec<(String, String)>>) {
         if let Some(new_bids) = bids {
             for (price, size) in new_bids {
-
                 if size == "0" {
                     self.bids.retain(|(p, _)| p != &price);
                 } else if let Some(pos) = self.bids.iter().position(|(p, _)| p == &price) {
@@ -43,7 +40,6 @@ impl OrderBook {
                     self.bids.push((price, size));
                 }
             }
-            // Sort bids descending
             self.bids.sort_by(|(p1, _), (p2, _)| {
                 let p1_f = p1.parse::<f64>().unwrap_or(0.0);
                 let p2_f = p2.parse::<f64>().unwrap_or(0.0);
@@ -60,7 +56,6 @@ impl OrderBook {
                     self.asks.push((price, size));
                 }
             }
-            // Sort asks ascending
             self.asks.sort_by(|(p1, _), (p2, _)| {
                 let p1_f = p1.parse::<f64>().unwrap_or(1.0);
                 let p2_f = p2.parse::<f64>().unwrap_or(1.0);
@@ -70,42 +65,69 @@ impl OrderBook {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TokenDirection {
     Up,
     Down,
 }
 
+/// One side (Up or Down) of a binary market.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct Market {
-    pub id: String,
-    pub direction: TokenDirection,
+pub struct TokenSide {
+    pub token_id: String,
     pub orderbook: OrderBook,
-    pub last_price: f64,
-    pub expiration: i64, // Unix timestamp
-    pub strike_price: f64, // The "Open" price of the 5m candle
+    pub orderbook_mid_price: f64,
+    pub last_trade_price: f64,
+    pub best_bid: f64,
+    pub best_ask: f64,
 }
 
-#[allow(dead_code)]
-impl Market {
-    pub fn new(id: String, direction: TokenDirection, expiration: i64, strike_price: f64) -> Self {
+impl TokenSide {
+    pub fn new(token_id: String) -> Self {
         Self {
-            id,
-            direction,
+            token_id,
             orderbook: OrderBook::new(),
-            last_price: 0.0,
-            expiration,
-            strike_price,
+            orderbook_mid_price: 0.0,
+            last_trade_price: 0.0,
+            best_bid: 0.0,
+            best_ask: 0.0,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A single Polymarket binary market containing both Up and Down sides.
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct Trade {
-    pub price: f64,
-    pub size: f64,
-    pub side: String, // "BUY" or "SELL"
-    pub timestamp: i64,
+pub struct Market {
+    pub slug: String,
+    pub started_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub strike_price: f64,
+    pub up: TokenSide,
+    pub down: TokenSide,
+}
+
+#[allow(dead_code)]
+impl Market {
+    pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64, strike_price: f64) -> Self {
+        Self {
+            slug,
+            started_at_ms,
+            expires_at_ms,
+            strike_price,
+            up: TokenSide::new(up_token_id),
+            down: TokenSide::new(down_token_id),
+        }
+    }
+
+    /// Get the token side matching a token ID, if any.
+    pub fn side_by_token(&mut self, token_id: &str) -> Option<&mut TokenSide> {
+        if self.up.token_id == token_id {
+            Some(&mut self.up)
+        } else if self.down.token_id == token_id {
+            Some(&mut self.down)
+        } else {
+            None
+        }
+    }
 }

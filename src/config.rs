@@ -8,7 +8,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub market: MarketConfig,
     #[serde(default)]
-    pub strategy: StrategyConfig,
+    pub engine: EngineConfig,
+    #[serde(default)]
+    pub strategy: StrategyConfigs,
     #[serde(default)]
     pub telegram: TelegramConfig,
 }
@@ -48,26 +50,27 @@ impl Default for MarketConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct StrategyConfig {
+#[allow(dead_code)]
+pub struct EngineConfig {
     #[serde(default = "default_killswitch")]
-    pub killswitch_threshold: f64,
-    #[serde(default = "default_max_spread")]
-    pub max_spread: f64,
+    pub exchange_divergence_threshold: f64,
     #[serde(default = "default_log_interval")]
-    pub log_interval_secs: i64,
-    #[serde(default = "default_divergence_exit")]
-    pub divergence_exit_pct: f64,
+    pub log_interval_secs: f64,
 }
 
-impl Default for StrategyConfig {
+impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            killswitch_threshold: default_killswitch(),
-            max_spread: default_max_spread(),
+            exchange_divergence_threshold: default_killswitch(),
             log_interval_secs: default_log_interval(),
-            divergence_exit_pct: default_divergence_exit(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StrategyConfigs {
+    #[serde(default)]
+    pub bono: crate::engine::strategies::bono::BonoStrategyConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,15 +94,28 @@ fn default_rpc_url() -> String { "https://polygon-rpc.com".to_string() }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
 fn default_killswitch() -> f64 { 50.0 }
-fn default_max_spread() -> f64 { 0.05 }
-fn default_log_interval() -> i64 { 1 }
-fn default_divergence_exit() -> f64 { 0.15 }
+fn default_log_interval() -> f64 { 1.0 }
 
 impl AppConfig {
     pub fn load(path: &str) -> Self {
         let content = fs::read_to_string(path)
             .unwrap_or_else(|_| panic!("Failed to read config file: {}", path));
-        toml::from_str(&content)
-            .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e))
+        let config: Self = toml::from_str(&content)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e));
+        let valid_assets = ["btc", "eth", "sol", "xrp"];
+        if !valid_assets.contains(&config.market.asset.to_lowercase().as_str()) {
+            panic!(
+                "Invalid asset: {}. Supported assets: btc, eth, sol, xrp",
+                config.market.asset
+            );
+        }
+        let valid_intervals = [5, 15];
+        if !valid_intervals.contains(&config.market.interval_minutes) {
+            panic!(
+                "Invalid interval_minutes: {}. Supported intervals: 5m, 15m",
+                config.market.interval_minutes
+            );
+        }
+        config
     }
 }
