@@ -123,6 +123,15 @@ impl<S: Strategy> StrategyEngine<S> {
             return;
         }
 
+        // Skip strategy checks until Polymarket price feed has populated both sides
+        let market_ready = market
+            .as_ref()
+            .map_or(false, |m| m.up.last_trade_price > 0.0 && m.down.last_trade_price > 0.0);
+
+        if !market_ready {
+            return;
+        }
+
         // IN-POSITION CHECKS
         if self.state == EngineState::InPosition {
             if let Some(ref market) = market {
