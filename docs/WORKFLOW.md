@@ -1,21 +1,47 @@
 # Workflow
 
-## Startup (main.rs)
+## Startup (bot.rs)
 
 1. Load `config.toml` — validate asset (btc/eth/sol/xrp) and interval (5/15)
-2. Acquire singleton lock (`.bot.lock`) — prevents duplicate instances
-3. Spawn 5 WebSocket feed tasks (all concurrent):
+2. Spawn 4 WebSocket feed tasks (all concurrent):
    - **Binance** — `aggTrade` stream → `binance_tx` (primary price oracle)
    - **Coinbase** — `ticker` stream → `coinbase_tx` (secondary oracle)
    - **Deribit** — DVOL index → `dvol_tx` (implied volatility)
-   - **Polymarket Orderbook** — SDK orderbook stream → `shared_markets` (Arc<Mutex<HashMap>>)
-   - **Polymarket Prices** — SDK price stream → `shared_markets` (last_trade_price, best_bid, best_ask)
-4. Sync server time offset with Polymarket CLOB
-5. Fetch on-chain USDC balance (if trading enabled)
-6. Init Telegram, build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
-7. Authenticate Polymarket SDK (if trading enabled)
-8. Wait for Binance first price before starting engine
-9. Enter 1ms tick loop
+   - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
+3. Sync server time offset with Polymarket CLOB
+4. Init Telegram, build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
+5. Authenticate Polymarket SDK (if trading enabled)
+6. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL) before starting engine
+
+## Market Rotation Loop
+
+```
+① DISCOVER MARKET
+│  Compute time bucket, check slugs via Gamma API
+│  Extract Up/Down token IDs, fetch strike price from Binance kline
+│
+② LOOKUP CHAINLINK STRIKE PRICE
+│  Find exact match (ts == started_ms) in chainlink_history
+│  No match → skip market, wait for expiry, rotate
+│
+③ UPDATE SHARED MARKET
+│  Set strike_price (chainlink), initial orderbook mid prices
+│
+④ SPAWN POLYMARKET WS TASKS
+│  - Orderbook stream (up + down tokens)
+│  - Price stream (last_trade_price, best_bid, best_ask)
+│
+⑤ WAIT FOR ORDERBOOK
+│  Poll until both up.best_bid > 0 and down.best_bid > 0
+│
+⑥ TICK LOOP (1ms) — until market expires
+│  → execute_tick() each iteration
+│
+⑦ CLEANUP
+│  Abort orderbook + price WS tasks
+│  Clear traded_slugs
+│  Rotate to next market
+```
 
 ## Tick Loop (`execute_tick` — every 1ms)
 
@@ -23,33 +49,20 @@
 ① KILLSWITCH
 │  |binance - coinbase| > exchange_divergence_threshold (absolute $)?
 │  Both feeds connected?
-│  YES → log every 5s, RETURN (full freeze — no entries, no exits)
+│  YES → log periodically, RETURN (full freeze — no entries, no exits)
 │
-② PENDING STATE CHECK
-│  State = PendingBuy or PendingSell?
-│  YES → reconcile_with_chain() every 2s or after 5s timeout → RETURN
+② IN-POSITION CHECKS (if state == InPosition)
+│  Token belongs to current market?
+│  YES → strategy.check_exit(ctx, market, position_size) → Some(OrderParams)?
+│        YES → execute_sell(token_id, order) → RETURN
 │
-③ IN-POSITION CHECKS (if state == InPosition)
-│  ├─ Market expired (time_to_expiry <= 0)?
-│  │  YES → settle binary payout (Up/Down) → reset to Idle → RETURN
-│  ├─ strategy.check_exit(ctx, market, position_size) → Some(OrderParams)?
-│  │  YES → execute_sell(market, order) → RETURN
-│  └─ Periodic reconcile_with_chain() every 15s
+③ ENTRY MATRIX (if state == Idle)
+│  Already traded this slug? → skip
+│  strategy.check_entry(ctx, market) → Some((direction, OrderParams))?
+│     YES → execute_buy(token_id, direction, slug, order)
 │
-④ UPDATE ATR
-│  ATR monitor tracks Binance price volatility
-│
-⑤ ENTRY MATRIX (if state == Idle)
-│  For each market:
-│     ├─ Already traded this session? → skip
-│     └─ strategy.check_entry(ctx, market, balance) → Some(OrderParams)?
-│        YES → execute_buy(market, order) → break
-│
-⑥ LOG (every log_interval_secs)
-│  [ENGINE] State | Balance | Asset Price | DVOL | Market Price | Spread
-│
-⑦ MARKET ID TRACKING
-   If no active market, adopt newly discovered market ID
+④ LOG (every log_interval_secs)
+│  [ENGINE] State | entry price | position size
 ```
 
 ## Strategy Trait
@@ -58,8 +71,8 @@ Strategies implement two methods:
 
 ```rust
 trait Strategy {
-    // Called each tick for idle markets. Return Some(OrderParams) to buy.
-    fn check_entry(&self, ctx: &TickContext, market: &Market, balance: f64) -> Option<OrderParams>;
+    // Called each tick when idle. Return Some((direction, order)) to buy.
+    fn check_entry(&self, ctx: &TickContext, market: &Market) -> Option<(TokenDirection, OrderParams)>;
 
     // Called each tick while holding a position.
     // Return Some(OrderParams) to sell, None to keep holding.
@@ -67,41 +80,36 @@ trait Strategy {
 }
 ```
 
-**TickContext** provides: `binance_price`, `coinbase_price`, `dvol`, `now_ms` (time-offset adjusted).
+**TickContext** provides: `binance_price`, `binance_ts`, `coinbase_price`, `coinbase_ts`, `chainlink_price`, `chainlink_ts`, `dvol`, `now_ms` (time-offset adjusted).
 
 **OrderParams**: `Limit { price, size }` or `Market { amount }`.
 
-The engine handles all infrastructure: state machine, order signing, on-chain reconciliation,
-killswitch, expiry settlement, logging, and Telegram alerts. The strategy only decides
+The engine handles all infrastructure: state machine, order signing,
+killswitch, logging, and Telegram alerts. The strategy only decides
 *when* to trade and *what order* to place.
 
 ## State Machine
 
 ```
-Idle ──[check_entry returns order]──→ PendingBuy ──[on-chain confirmed]──→ InPosition
- ↑                                       │ (timeout 5s → Idle)                │
- │                                       │                                    │
- └───────────────────────────────────────┴──[check_exit returns order]──→ PendingSell
-                                                                          │ (timeout 5s → InPosition)
-                                                                          │ (confirmed → Idle)
+Idle ──[check_entry returns order]──→ InPosition
+ ↑                                       │
+ └───[check_exit returns order]──────────┘
 ```
 
-- **Idle** — No position. Engine iterates markets, calls `check_entry` on each.
-- **PendingBuy** — Buy order submitted to Polymarket CLOB. Engine polls chain via `reconcile_with_chain()` every 2s. If shares appear on-chain → InPosition. If 5s timeout → Idle.
-- **InPosition** — Holding shares. Engine checks expiry settlement, then calls `check_exit`. Reconciles position size with chain every 15s.
-- **PendingSell** — Sell order submitted. If shares disappear on-chain → Idle. If 5s timeout → InPosition.
+- **Idle** — No position. Engine calls `check_entry` on the current market.
+- **InPosition** — Holding shares. Engine calls `check_exit` each tick.
 
 ## Order Execution
 
 ### execute_buy (engine)
 
-- **Live mode**: Sets PendingBuy → signs order via Polymarket SDK → submits to CLOB. On failure, reverts to Idle.
+- **Live mode**: Signs order via Polymarket SDK → submits to CLOB. On success → InPosition. On failure → stays Idle.
 - **Sim mode**: Immediately sets InPosition with the order's price/size. No on-chain interaction.
 
 ### execute_sell (engine)
 
-- **Live mode**: Sets PendingSell → signs order → submits. On failure, reverts to InPosition.
-- **Sim mode**: Calculates PnL from entry price, updates simulated balance, resets to Idle.
+- **Live mode**: Signs order → submits. On success → Idle. On failure → stays InPosition.
+- **Sim mode**: Calculates PnL from entry price, resets to Idle.
 
 ### sign_and_submit (engine)
 
@@ -112,49 +120,38 @@ Handles both Limit and Market order types:
 - Posts to Polymarket CLOB
 - Returns success/failure
 
-## On-Chain Reconciliation
-
-`reconcile_with_chain()` verifies engine state against Polygon (500ms timeout):
-
-1. **USDC balance** — `balanceOf` on USDC contract (`0x2791B...`), syncs `simulated_balance` if drift > $0.05
-2. **CTF position** — `balanceOf(address, tokenId)` on CTF contract (`0x4D97d...`), syncs `position_size`
-3. **Pending confirmation**:
-   - PendingBuy: shares > 0.01 on-chain → InPosition. Timeout 5s → Idle.
-   - PendingSell: shares < 0.01 on-chain → Idle. Timeout 5s → InPosition.
-4. **Drift detection**: If InPosition and chain shares differ from engine state → sync.
-
-Uses raw JSON-RPC `eth_call` (no ethers dependency). Token IDs are converted from decimal to 256-bit hex via `decimal_to_hex256`.
-
 ## Market Discovery
 
-On startup (and after each market expires), the Polymarket orderbook task:
+On startup (and after each market expires):
 
 1. Computes current time bucket: `(now / interval_secs) * interval_secs`
 2. Checks two slugs: current bucket and next bucket (e.g. `btc-updown-5m-1710000000`)
 3. Fetches market metadata from Polymarket Gamma API
 4. Extracts Up/Down token IDs from market outcomes
 5. Fetches strike price from Binance kline API (candle open price)
-6. Creates `Market` structs in `shared_markets` with initial prices
-7. Subscribes to orderbook + price WebSocket streams for both tokens
+6. Looks up chainlink strike price from history (exact timestamp match with started_ms)
+7. Creates `Market` struct in `shared_market` with strike price and initial prices
+8. Subscribes to orderbook + price WebSocket streams for both tokens
 
 ## Data Feeds
 
 | Feed | Source | Channel | Update Rate |
 |------|--------|---------|-------------|
-| Binance price | `aggTrade` WS | `watch<f64>` | ~100ms |
-| Coinbase price | `ticker` WS | `watch<f64>` | ~1s |
+| Binance price | `aggTrade` WS | `watch<(f64, i64)>` | ~100ms |
+| Coinbase price | `ticker` WS | `watch<(f64, i64)>` | ~1s |
+| Chainlink price | Polymarket live-data WS | `watch<(f64, i64)>` + history deque | on update |
 | Deribit DVOL | `deribit_volatility_index` WS | `watch<f64>` | ~5s |
-| Polymarket orderbook | SDK `subscribe_orderbook` | `Arc<Mutex<HashMap>>` | on update |
-| Polymarket prices | SDK `subscribe_prices` | `Arc<Mutex<HashMap>>` | on update |
+| Polymarket orderbook | SDK `subscribe_orderbook` | `Arc<Mutex<Option<Market>>>` | on update |
+| Polymarket prices | SDK `subscribe_prices` | `Arc<Mutex<Option<Market>>>` | on update |
 
-All feeds auto-reconnect on disconnect with 5s backoff.
+All feeds auto-reconnect on disconnect with exponential backoff (5s–60s).
 
 ## Config Structure
 
 ```toml
 [wallet]          # Private key, trading_enabled, RPC URL
 [market]          # Asset (btc/eth/sol/xrp), interval_minutes (5/15)
-[engine]          # exchange_divergence_threshold, log_interval_secs
+[engine]          # budget, exchange_divergence_threshold, log_interval_secs
 [strategy.bono]   # Strategy-specific config
 [telegram]        # bot_token, chat_id
 ```

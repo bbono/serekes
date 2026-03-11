@@ -17,9 +17,9 @@ interval_minutes = 5
 [engine]
 # USDC budget the bot is allowed to spend per trade (default: 3.0)
 budget = 3.0
-# Max allowed price divergence (%) between Coinbase and Binance before triggering killswitch
+# Max allowed absolute price divergence ($) between Coinbase and Binance before triggering killswitch
 # If exceeded, all trading activity is halted (default: 50.0)
-exchange_divergence_threshold = 50.0
+exchange_price_divergence_threshold = 50.0
 # Minimum seconds between engine log outputs, supports decimals (default: 0.5)
 log_interval_secs = 0.5
 

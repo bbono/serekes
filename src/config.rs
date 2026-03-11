@@ -21,8 +21,6 @@ pub struct WalletConfig {
     pub private_key: String,
     #[serde(default)]
     pub trading_enabled: bool,
-    #[serde(default = "default_rpc_url")]
-    pub polygon_rpc_url: String,
 }
 
 impl Default for WalletConfig {
@@ -30,7 +28,6 @@ impl Default for WalletConfig {
         Self {
             private_key: String::new(),
             trading_enabled: false,
-            polygon_rpc_url: default_rpc_url(),
         }
     }
 }
@@ -55,7 +52,7 @@ pub struct EngineConfig {
     #[serde(default = "default_budget")]
     pub budget: f64,
     #[serde(default = "default_killswitch")]
-    pub exchange_divergence_threshold: f64,
+    pub exchange_price_divergence_threshold: f64,
     #[serde(default = "default_log_interval")]
     pub log_interval_secs: f64,
 }
@@ -64,7 +61,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             budget: default_budget(),
-            exchange_divergence_threshold: default_killswitch(),
+            exchange_price_divergence_threshold: default_killswitch(),
             log_interval_secs: default_log_interval(),
         }
     }
@@ -93,7 +90,6 @@ impl Default for TelegramConfig {
     }
 }
 
-fn default_rpc_url() -> String { "https://polygon-rpc.com".to_string() }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
 fn default_budget() -> f64 { 3.0 }

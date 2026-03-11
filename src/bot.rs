@@ -30,30 +30,6 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
-use std::sync::LazyLock;
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap()
-});
-
-/// Raw JSON-RPC eth_call. Returns USDC balance (6 decimals) as f64.
-pub async fn rpc_eth_call(rpc_url: &str, to: &str, data: &str) -> Option<f64> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "eth_call",
-        "params": [{"to": to, "data": data}, "latest"],
-        "id": 1
-    });
-    let resp = HTTP_CLIENT.post(rpc_url).json(&body).send().await.ok()?;
-    let json: serde_json::Value = resp.json().await.ok()?;
-    let hex_str = json["result"].as_str()?;
-    let hex_str = hex_str.trim_start_matches("0x");
-    let val = u128::from_str_radix(hex_str, 16).ok()?;
-    Some(val as f64 / 1_000_000.0)
-}
-
 async fn fetch_active_market_id(
     asset: &str,
     interval_minutes: u32,
@@ -251,7 +227,10 @@ async fn main() {
                 }
                 Err(e) => {
                     let delay = backoff_secs(attempts);
-                    eprintln!("[BOT] Binance WS Error: {}. Reconnecting in {}s...", e, delay);
+                    eprintln!(
+                        "[BOT] Binance WS Error: {}. Reconnecting in {}s...",
+                        e, delay
+                    );
                     sleep(Duration::from_secs(delay)).await;
                     attempts += 1;
                 }
@@ -290,7 +269,10 @@ async fn main() {
                 }
                 Err(e) => {
                     let delay = backoff_secs(attempts);
-                    eprintln!("[BOT] Coinbase WS Error: {}. Reconnecting in {}s...", e, delay);
+                    eprintln!(
+                        "[BOT] Coinbase WS Error: {}. Reconnecting in {}s...",
+                        e, delay
+                    );
                     sleep(Duration::from_secs(delay)).await;
                     attempts += 1;
                 }
@@ -335,7 +317,10 @@ async fn main() {
                 }
                 Err(e) => {
                     let delay = backoff_secs(attempts);
-                    eprintln!("[BOT] Deribit WS Error: {}. Reconnecting in {}s...", e, delay);
+                    eprintln!(
+                        "[BOT] Deribit WS Error: {}. Reconnecting in {}s...",
+                        e, delay
+                    );
                     sleep(Duration::from_secs(delay)).await;
                     attempts += 1;
                 }
@@ -373,7 +358,9 @@ async fn main() {
                                     json["payload"]["timestamp"].as_i64(),
                                 ) {
                                     let _ = chainlink_tx.send((price, ts));
-                                    let mut hist = chainlink_history_ws.lock().unwrap_or_else(|e| e.into_inner());
+                                    let mut hist = chainlink_history_ws
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
                                     hist.push_back((price, ts));
                                     if hist.len() > chainlink_history_max {
                                         hist.pop_front();
@@ -385,7 +372,10 @@ async fn main() {
                 }
                 Err(e) => {
                     let delay = backoff_secs(attempts);
-                    eprintln!("[BOT] Chainlink WS Error: {}. Reconnecting in {}s...", e, delay);
+                    eprintln!(
+                        "[BOT] Chainlink WS Error: {}. Reconnecting in {}s...",
+                        e, delay
+                    );
                     sleep(Duration::from_secs(delay)).await;
                     attempts += 1;
                 }
@@ -427,7 +417,6 @@ async fn main() {
         config.wallet.trading_enabled,
         market_asset.clone(),
         time_offset,
-        config.wallet.polygon_rpc_url.clone(),
         config.engine.clone(),
         binance_rx,
         coinbase_rx,
@@ -486,7 +475,7 @@ async fn main() {
                     hist.iter()
                         .rev()
                         .min_by_key(|(_, ts)| (ts - started_ms).unsigned_abs())
-                        .filter(|(_, ts)| (ts - started_ms).unsigned_abs() < 5000)
+                        .filter(|(_, ts)| (ts - started_ms).unsigned_abs() ==0)
                         .map(|(price, _)| *price)
                         .unwrap_or(0.0)
                 };
