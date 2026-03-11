@@ -3,6 +3,8 @@ use std::fs;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     #[serde(default)]
     pub wallet: WalletConfig,
     #[serde(default)]
@@ -49,20 +51,20 @@ impl Default for MarketConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct EngineConfig {
-    #[serde(default = "default_budget")]
-    pub budget: f64,
     #[serde(default = "default_killswitch")]
     pub exchange_price_divergence_threshold: f64,
     #[serde(default = "default_log_interval")]
     pub log_interval_secs: f64,
+    #[serde(default = "default_binance_history_max")]
+    pub binance_history_max: usize,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            budget: default_budget(),
             exchange_price_divergence_threshold: default_killswitch(),
             log_interval_secs: default_log_interval(),
+            binance_history_max: default_binance_history_max(),
         }
     }
 }
@@ -90,11 +92,12 @@ impl Default for TelegramConfig {
     }
 }
 
+fn default_log_level() -> String { "info".to_string() }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
-fn default_budget() -> f64 { 3.0 }
 fn default_killswitch() -> f64 { 50.0 }
 fn default_log_interval() -> f64 { 0.5 }
+fn default_binance_history_max() -> usize { 10_000 }
 
 impl AppConfig {
     pub fn load(path: &str) -> Self {

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use crate::types::{Market, TokenDirection};
 /// Snapshot of market state passed to strategy on every engine tick (1ms loop).
 ///
@@ -26,6 +28,14 @@ pub struct TickContext {
 
     /// Current unix ms, adjusted for Polymarket server time offset.
     pub now_ms: i64,
+
+    /// Recent binance price history: (price, timestamp_ms), oldest first.
+    /// Lock only when needed — avoid holding across await points.
+    pub binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+
+    /// Recent chainlink price history: (price, timestamp_ms), oldest first.
+    /// Lock only when needed — avoid holding across await points.
+    pub chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 }
 
 /// Describes how to place an order. The engine signs and submits it
@@ -53,7 +63,24 @@ pub enum OrderParams {
     ///   For sell orders this is the number of shares to sell.
     ///   The engine passes it to `Amount::usdc()` or `Amount::shares()`
     ///   depending on the side.
-    Market { amount: f64 },
+    ///
+    /// `price`: optional worst-case price. If None, SDK calculates from orderbook.
+    /// `order_type`: FAK (fill-and-kill, default) or FOK (fill-or-kill).
+    Market {
+        amount: f64,
+        price: Option<f64>,
+        order_type: MarketOrderType,
+    },
+}
+
+/// Fill type for market orders.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub enum MarketOrderType {
+    /// Fill-and-kill: fill as much as possible, cancel the rest.
+    FAK,
+    /// Fill-or-kill: fill entirely or cancel the whole order.
+    FOK,
 }
 
 impl OrderParams {
@@ -65,7 +92,7 @@ impl OrderParams {
     pub fn price_and_size(&self) -> (f64, f64) {
         match self {
             OrderParams::Limit { price, size } => (*price, *size),
-            OrderParams::Market { amount } => (*amount, *amount),
+            OrderParams::Market { amount, .. } => (*amount, *amount),
         }
     }
 }
@@ -77,4 +104,8 @@ pub trait Strategy {
     /// Called each tick while holding a position.
     /// Return Some(OrderParams) to sell, None to keep holding.
     fn check_exit(&self, _ctx: &TickContext, _market: &Market, _position_size: f64) -> Option<OrderParams> { None }
+
+    /// Whether this strategy manages its own exit logic.
+    /// If false, the engine considers itself done immediately after entry.
+    fn manages_exit(&self) -> bool { false }
 }

@@ -9,14 +9,16 @@ pub enum TokenDirection {
 #[derive(Debug, Clone)]
 pub struct TokenSide {
     pub token_id: String,
-    pub last_trade_price: f64,
+    pub best_bid: f64,
+    pub best_ask: f64,
 }
 
 impl TokenSide {
     pub fn new(token_id: String) -> Self {
         Self {
             token_id,
-            last_trade_price: 0.0,
+            best_bid: 0.0,
+            best_ask: 0.0,
         }
     }
 }

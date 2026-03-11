@@ -1,32 +1,38 @@
+# Log level: "error", "warn", "info", "debug", "trace" (default: "info")
+log_level = "info"
+
 [wallet]
-# Polygon wallet private key used for signing Polymarket orders
-private_key = ""
-# Enable/disable live order execution. When false, bot runs in monitor-only mode
-trading_enabled = false
-# Polygon RPC endpoint for on-chain interactions
+# Polygon wallet private key used for signing Polymarket orders (default: "")
+private_key = "0x42f2a8435c6e9d80d67a357ec6ce7c78775979d3b14a6d3c1e6e1d3f12e0b3aa"
+# Enable/disable live order execution. When false, bot runs in monitor-only mode (default: false)
+trading_enabled = true
+# Polygon RPC endpoint for on-chain interactions (default: "https://polygon-rpc.com")
 polygon_rpc_url = "https://polygon-rpc.com"
 
 [market]
 # Asset to trade (used for Polymarket slug and Binance/Coinbase price feeds)
-# Supported: "btc", "eth", "sol", "xrp"
+# Supported: "btc", "eth", "sol", "xrp" (default: "btc")
 asset = "btc"
 # Candle interval in minutes. Supported values: 5 (5m), 15 (15m)
-# Determines which Polymarket up/down market to discover and the Binance kline interval
+# Determines which Polymarket up/down market to discover and the Binance kline interval (default: 5)
 interval_minutes = 5
 
 [engine]
-# USDC budget the bot is allowed to spend per trade
-budget = 3.0
-# Max allowed price divergence (%) between Coinbase and Binance before triggering killswitch
-# If exceeded, all trading activity is halted
-exchange_divergence_threshold = 50.0
-# Minimum seconds between engine log outputs (supports decimals, e.g. 0.5)
-log_interval_secs = 1
+# Max allowed absolute price divergence ($) between Coinbase and Binance before triggering killswitch
+# If exceeded, all trading activity is halted (default: 50.0)
+exchange_price_divergence_threshold = 50.0
+# Minimum seconds between engine log outputs, supports decimals (default: 0.5)
+log_interval_secs = 0.5
+
 # Strategy-specific config. Each strategy has its own section.
 [strategy.bono]
+# Seconds after market start before placing entry (default: 10.0)
+delay_secs = 10.0
+# USDC budget per trade (default: 3.0)
+budget = 1.0
 
 [telegram]
-# Telegram bot token for sending notifications (from @BotFather)
+# Telegram bot token for sending notifications from @BotFather (default: "")
 bot_token = ""
-# Telegram chat ID to receive notifications
+# Telegram chat ID to receive notifications (default: "")
 chat_id = ""

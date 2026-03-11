@@ -28,7 +28,7 @@ pub fn send_alert(message: &str) {
             .send()
             .await
         {
-            eprintln!("[TELEGRAM] Failed to send alert: {}", e);
+            log::error!("Failed to send alert: {}", e);
         }
     });
 }
