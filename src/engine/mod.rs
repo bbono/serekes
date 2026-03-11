@@ -136,16 +136,22 @@ impl<S: Strategy> StrategyEngine<S> {
         let now_sec = now_ms / 1000;
         let market = self.shared_market.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-        let exchange_divergence = (binance_price - coinbase_price).abs();
+        let exchange_divergence_pct = if coinbase_price > 0.0 {
+            ((binance_price - coinbase_price) / coinbase_price * 100.0).abs()
+        } else {
+            0.0
+        };
 
         // KILLSWITCH
-        if exchange_divergence > self.engine_config.exchange_divergence_threshold
+        if exchange_divergence_pct > self.engine_config.exchange_divergence_threshold
             && coinbase_price > 0.0
             && binance_price > 0.0
         {
-            if now_sec % 5 == 0 {
-                println!("[ENGINE] Killswitch - Market De-Peg! Binance: ${:.2} | Coinbase: ${:.2} | Divergence: ${:.2}",
-                    binance_price, coinbase_price, exchange_divergence);
+            let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
+            if now_ms - self.last_oracle_log >= log_interval_ms {
+                self.last_oracle_log = now_ms;
+                println!("[ENGINE] Killswitch - Market De-Peg! Binance: ${:.2} | Coinbase: ${:.2} | Divergence: {:.2}%",
+                    binance_price, coinbase_price, exchange_divergence_pct);
             }
             return;
         }
