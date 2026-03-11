@@ -123,20 +123,18 @@ impl<S: Strategy> StrategyEngine<S> {
         }
     }
 
-    pub async fn execute_tick(
-        &mut self,
-        (binance_price, binance_ts): (f64, i64),
-        (coinbase_price, coinbase_ts): (f64, i64),
-        (chainlink_price, chainlink_ts): (f64, i64),
-    ) {
+    pub async fn execute_tick(&mut self) {
+        let (binance_price, binance_ts) = *self.binance_rx.borrow();
+        let (coinbase_price, coinbase_ts) = *self.coinbase_rx.borrow();
+        let (chainlink_price, chainlink_ts) = *self.chainlink_rx.borrow();
+        let dvol = *self.dvol_rx.borrow();
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64
             + (self.time_offset * 1000);
         let now_sec = now_ms / 1000;
-        let dvol = *self.dvol_rx.borrow();
-        let market = self.shared_market.lock().unwrap().clone();
+        let market = self.shared_market.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         let exchange_divergence = (binance_price - coinbase_price).abs();
 
@@ -157,6 +155,19 @@ impl<S: Strategy> StrategyEngine<S> {
             self.state,
             EngineState::PendingBuy | EngineState::PendingSell
         ) {
+            // If market expired while pending, force reset to Idle
+            if let Some(ref market) = market {
+                if market.expires_at_ms <= now_ms {
+                    eprintln!("[ENGINE] Market expired while in {:?}. Resetting to Idle.", self.state);
+                    self.state = EngineState::Idle;
+                    self.position_size = 0.0;
+                    self.entry_price = 0.0;
+                    self.active_token_id = None;
+                    self.active_direction = None;
+                    self.pending_since = 0;
+                    return;
+                }
+            }
             if self.trading_enabled
                 && (now_ms - self.last_recon_ms > 2000 || now_ms - self.pending_since > 5000)
             {
@@ -175,6 +186,10 @@ impl<S: Strategy> StrategyEngine<S> {
                         // Engine-level: expiry settlement
                         let time_to_expiry = market.expires_at_ms - now_ms;
                         if time_to_expiry <= 0 {
+                            if !binance_price.is_finite() || !market.strike_price_binance.is_finite() {
+                                eprintln!("[ENGINE] Invalid prices at expiry. binance={} strike={}", binance_price, market.strike_price_binance);
+                                return;
+                            }
                             let direction = self.active_direction.unwrap_or(TokenDirection::Up);
                             let settlement = match direction {
                                 TokenDirection::Up => {
@@ -268,7 +283,9 @@ impl<S: Strategy> StrategyEngine<S> {
         let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
         if now_ms - self.last_oracle_log >= log_interval_ms {
             self.last_oracle_log = now_ms;
-            println!("[ENGINE] {:?}", self.state);
+            if self.state != EngineState::Idle {
+                println!("[ENGINE] {:?} | entry ${:.4} | size {:.2}", self.state, self.entry_price, self.position_size);
+            }
         }
     }
 

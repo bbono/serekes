@@ -22,7 +22,6 @@ budget = 3.0
 exchange_divergence_threshold = 50.0
 # Minimum seconds between engine log outputs (supports decimals, e.g. 0.5)
 log_interval_secs = 1
-
 # Strategy-specific config. Each strategy has its own section.
 [strategy.bono]
 

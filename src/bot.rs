@@ -19,6 +19,10 @@ use crate::config::AppConfig;
 use crate::engine::{BonoStrategy, StrategyEngine};
 use tokio::sync::watch;
 
+fn backoff_secs(attempt: u32) -> u64 {
+    (5u64 << attempt.min(4)).min(60)
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -26,16 +30,23 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
+use std::sync::LazyLock;
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap()
+});
+
 /// Raw JSON-RPC eth_call. Returns USDC balance (6 decimals) as f64.
 pub async fn rpc_eth_call(rpc_url: &str, to: &str, data: &str) -> Option<f64> {
-    let client = reqwest::Client::new();
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "eth_call",
         "params": [{"to": to, "data": data}, "latest"],
         "id": 1
     });
-    let resp = client.post(rpc_url).json(&body).send().await.ok()?;
+    let resp = HTTP_CLIENT.post(rpc_url).json(&body).send().await.ok()?;
     let json: serde_json::Value = resp.json().await.ok()?;
     let hex_str = json["result"].as_str()?;
     let hex_str = hex_str.trim_start_matches("0x");
@@ -46,7 +57,8 @@ pub async fn rpc_eth_call(rpc_url: &str, to: &str, data: &str) -> Option<f64> {
 async fn fetch_active_market_id(
     asset: &str,
     interval_minutes: u32,
-) -> Result<(String, String, String, i64, i64, f64, f64), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(String, String, String, i64, i64, f64, f64), Box<dyn std::error::Error + Send + Sync>>
+{
     println!("[BOT] Fetching active {} market...", asset.to_uppercase());
 
     let binance_symbol = format!("{}USDT", asset.to_uppercase());
@@ -63,7 +75,10 @@ async fn fetch_active_market_id(
     let timestamps_to_check = vec![bucket_start_ts, bucket_start_ts + interval_secs];
 
     let gamma_client = gamma::Client::default();
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
 
     for ts in timestamps_to_check {
         let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts);
@@ -86,21 +101,22 @@ async fn fetch_active_market_id(
                     "https://api.binance.com/api/v3/klines?symbol={}&interval={}&startTime={}&limit=1",
                     binance_symbol, kline_interval, ts * 1000
                 );
-                let strike_price_binance = if let Ok(resp) = http_client.get(&kline_url).send().await {
-                    if resp.status().is_success() {
-                        let k_json: serde_json::Value = resp.json().await.unwrap_or_default();
-                        k_json
-                            .as_array()
-                            .and_then(|arr| arr.first())
-                            .and_then(|k| k[1].as_str())
-                            .and_then(|s| s.parse::<f64>().ok())
-                            .unwrap_or(0.0)
+                let strike_price_binance =
+                    if let Ok(resp) = http_client.get(&kline_url).send().await {
+                        if resp.status().is_success() {
+                            let k_json: serde_json::Value = resp.json().await.unwrap_or_default();
+                            k_json
+                                .as_array()
+                                .and_then(|arr| arr.first())
+                                .and_then(|k| k[1].as_str())
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0)
+                        } else {
+                            0.0
+                        }
                     } else {
                         0.0
-                    }
-                } else {
-                    0.0
-                };
+                    };
 
                 if let (Some(tokens_str), Some(outcomes_str)) =
                     (&market.clob_token_ids, &market.outcomes)
@@ -126,7 +142,10 @@ async fn fetch_active_market_id(
                         }
                     }
 
-                    if !up_token.is_empty() && !down_token.is_empty() && expires_at_ms > now_secs() * 1000 {
+                    if !up_token.is_empty()
+                        && !down_token.is_empty()
+                        && expires_at_ms > now_secs() * 1000
+                    {
                         println!(
                             "[BOT] {} {}m Markets Found: UP: {} | DOWN: {}",
                             asset.to_uppercase(),
@@ -168,7 +187,6 @@ async fn fetch_active_market_id(
     .into())
 }
 
-
 #[tokio::main]
 async fn main() {
     let config = AppConfig::load("config.toml");
@@ -181,7 +199,6 @@ async fn main() {
     } else {
         Some(config.wallet.private_key.clone())
     };
-
 
     let binance_ws_url = format!(
         "wss://stream.binance.com:9443/ws/{}usdt@aggTrade",
@@ -211,9 +228,11 @@ async fn main() {
     // --- BINANCE WS TASK (Primary) ---
     let binance_ws_url_clone = binance_ws_url.clone();
     tokio::spawn(async move {
+        let mut attempts = 0u32;
         loop {
             match connect_async(Url::parse(&binance_ws_url_clone).unwrap()).await {
                 Ok((ws_stream, _)) => {
+                    attempts = 0;
                     println!("[BOT] Connected to Binance WS");
                     let (_, mut read) = ws_stream.split();
                     while let Some(msg) = read.next().await {
@@ -221,7 +240,8 @@ async fn main() {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                                 if let Some(p_str) = json["p"].as_str() {
                                     if let Ok(price) = p_str.parse::<f64>() {
-                                        let ts = json["T"].as_i64().unwrap_or_else(|| now_secs() * 1000);
+                                        let ts =
+                                            json["T"].as_i64().unwrap_or_else(|| now_secs() * 1000);
                                         let _ = binance_tx.send((price, ts));
                                     }
                                 }
@@ -230,8 +250,10 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[BOT] Binance WS Error: {}. Reconnecting...", e);
-                    sleep(Duration::from_secs(5)).await;
+                    let delay = backoff_secs(attempts);
+                    eprintln!("[BOT] Binance WS Error: {}. Reconnecting in {}s...", e, delay);
+                    sleep(Duration::from_secs(delay)).await;
+                    attempts += 1;
                 }
             }
         }
@@ -240,9 +262,11 @@ async fn main() {
     // --- COINBASE WS TASK ---
     let coinbase_product = format!("{}-USD", market_asset.to_uppercase());
     tokio::spawn(async move {
+        let mut attempts = 0u32;
         loop {
             match connect_async(Url::parse("wss://ws-feed.exchange.coinbase.com").unwrap()).await {
                 Ok((mut ws_stream, _)) => {
+                    attempts = 0;
                     println!("[BOT] Connected to Coinbase WS");
                     let sub = serde_json::json!({
                         "type": "subscribe",
@@ -265,8 +289,10 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[BOT] Coinbase WS Error: {}. Reconnecting...", e);
-                    sleep(Duration::from_secs(5)).await;
+                    let delay = backoff_secs(attempts);
+                    eprintln!("[BOT] Coinbase WS Error: {}. Reconnecting in {}s...", e, delay);
+                    sleep(Duration::from_secs(delay)).await;
+                    attempts += 1;
                 }
             }
         }
@@ -275,9 +301,11 @@ async fn main() {
     // --- DERIBIT DVOL TASK ---
     let dvol_asset = market_asset.clone();
     tokio::spawn(async move {
+        let mut attempts = 0u32;
         loop {
             match connect_async(Url::parse("wss://www.deribit.com/ws/api/v2").unwrap()).await {
                 Ok((mut ws_stream, _)) => {
+                    attempts = 0;
                     println!("[BOT] Connected to Deribit DVOL WS");
                     let subscribe_msg = serde_json::json!({
                         "jsonrpc": "2.0",
@@ -306,8 +334,10 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[BOT] Deribit WS Error: {}. Reconnecting...", e);
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let delay = backoff_secs(attempts);
+                    eprintln!("[BOT] Deribit WS Error: {}. Reconnecting in {}s...", e, delay);
+                    sleep(Duration::from_secs(delay)).await;
+                    attempts += 1;
                 }
             }
         }
@@ -319,9 +349,11 @@ async fn main() {
     let chainlink_history_ws = chainlink_history.clone();
     let chainlink_asset = market_asset.clone();
     tokio::spawn(async move {
+        let mut attempts = 0u32;
         loop {
             match connect_async(Url::parse("wss://ws-live-data.polymarket.com").unwrap()).await {
                 Ok((mut ws_stream, _)) => {
+                    attempts = 0;
                     println!("[BOT] Connected to Polymarket Chainlink WS");
                     let sub = serde_json::json!({
                         "action": "subscribe",
@@ -341,7 +373,7 @@ async fn main() {
                                     json["payload"]["timestamp"].as_i64(),
                                 ) {
                                     let _ = chainlink_tx.send((price, ts));
-                                    let mut hist = chainlink_history_ws.lock().unwrap();
+                                    let mut hist = chainlink_history_ws.lock().unwrap_or_else(|e| e.into_inner());
                                     hist.push_back((price, ts));
                                     if hist.len() > chainlink_history_max {
                                         hist.pop_front();
@@ -352,8 +384,10 @@ async fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[BOT] Chainlink WS Error: {}. Reconnecting...", e);
-                    sleep(Duration::from_secs(5)).await;
+                    let delay = backoff_secs(attempts);
+                    eprintln!("[BOT] Chainlink WS Error: {}. Reconnecting in {}s...", e, delay);
+                    sleep(Duration::from_secs(delay)).await;
+                    attempts += 1;
                 }
             }
         }
@@ -448,9 +482,11 @@ async fn main() {
 
                 // --- Lookup strike price from chainlink history ---
                 let strike_price_chainlink = {
-                    let hist = chainlink_history.lock().unwrap();
+                    let hist = chainlink_history.lock().unwrap_or_else(|e| e.into_inner());
                     hist.iter()
-                        .find(|(_, ts)| *ts == started_ms)
+                        .rev()
+                        .min_by_key(|(_, ts)| (ts - started_ms).unsigned_abs())
+                        .filter(|(_, ts)| (ts - started_ms).unsigned_abs() < 5000)
                         .map(|(price, _)| *price)
                         .unwrap_or(0.0)
                 };
@@ -458,14 +494,14 @@ async fn main() {
                     let wait_secs = (expires_ms / 1000).saturating_sub(now_secs()).max(1) as u64;
                     let interval_secs = (interval_minutes as u64) * 60;
                     eprintln!("[BOT] No strike_price price for {}.", slug);
-                    if interval_secs - wait_secs > 10 {
+                    if interval_secs.saturating_sub(wait_secs) > 10 {
                         sleep(Duration::from_secs(wait_secs)).await;
                     }
                     continue;
                 }
                 // --- Update shared market ---
                 {
-                    let mut guard = shared_market.lock().unwrap();
+                    let mut guard = shared_market.lock().unwrap_or_else(|e| e.into_inner());
                     let mut m = Market::new(slug.clone(), up_id.clone(), down_id.clone(), started_ms, expires_ms, strike);
                     m.strike_price = strike_price_chainlink;
                     m.up.orderbook_mid_price = initial_price;
@@ -495,7 +531,7 @@ async fn main() {
                         while let Some(result) = stream.next().await {
                             match result {
                                 Ok(book) => {
-                                    let mut guard = ob_shared.lock().unwrap();
+                                    let mut guard = ob_shared.lock().unwrap_or_else(|e| e.into_inner());
                                     if let Some(m) = guard.as_mut() {
                                         if let Some(side) = m.side_by_token(&book.asset_id) {
                                             let bids: Vec<(String, String)> = book
@@ -551,7 +587,7 @@ async fn main() {
                         while let Some(result) = stream.next().await {
                             match result {
                                 Ok(price_change) => {
-                                    let mut guard = price_shared.lock().unwrap();
+                                    let mut guard = price_shared.lock().unwrap_or_else(|e| e.into_inner());
                                     if let Some(m) = guard.as_mut() {
                                         for entry in &price_change.price_changes {
                                             if let Some(side) = m.side_by_token(&entry.asset_id) {
@@ -587,21 +623,30 @@ async fn main() {
 
                 println!("[BOT] Market active: {} | Expires: {}ms", slug, expires_ms);
 
+                // --- Wait for Polymarket WS to populate orderbook ---
+                loop {
+                    let ready = {
+                        let guard = shared_market.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.as_ref().map_or(false, |m| m.up.best_bid > 0.0 && m.down.best_bid > 0.0)
+                    };
+                    if ready { break; }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                println!("[BOT] Orderbook ready for {}", slug);
+
                 // --- Tick loop until market expires ---
                 loop {
                     if now_secs() * 1000 > expires_ms + 1000 {
                         break;
                     }
-                    let b = *engine.binance_rx.borrow();
-                    let c = *engine.coinbase_rx.borrow();
-                    let cl = *engine.chainlink_rx.borrow();
-                    engine.execute_tick(b, c, cl).await;
-                    tokio::task::yield_now().await;
+                    engine.execute_tick().await;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
 
                 // --- Cleanup: abort market-specific tasks ---
                 ob_handle.abort();
                 price_handle.abort();
+                engine.traded_slugs.clear();
                 println!("[BOT] Market {} expired. Rotating...", slug);
             }
         } => {},
@@ -612,5 +657,4 @@ async fn main() {
             println!("\n[BOT] SIGTERM received.");
         }
     }
-
 }

@@ -57,8 +57,8 @@ impl OrderBook {
                 }
             }
             self.asks.sort_by(|(p1, _), (p2, _)| {
-                let p1_f = p1.parse::<f64>().unwrap_or(1.0);
-                let p2_f = p2.parse::<f64>().unwrap_or(1.0);
+                let p1_f = p1.parse::<f64>().unwrap_or(0.0);
+                let p2_f = p2.parse::<f64>().unwrap_or(0.0);
                 p1_f.partial_cmp(&p2_f).unwrap_or(std::cmp::Ordering::Equal)
             });
         }

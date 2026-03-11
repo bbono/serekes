@@ -23,6 +23,7 @@ impl Strategy for BonoStrategy {
         _ctx: &TickContext,
         _market: &Market,
     ) -> Option<(TokenDirection, OrderParams)> {
+        println!("Bono Check entry");
         None
     }
 }
