@@ -694,10 +694,8 @@ async fn main() {
                     if now_secs() * 1000 > info.expires_ms + 1000 {
                         break;
                     }
-                    let result = engine.execute_tick().await;
-
-                    if let Some(order) = result.order {
-                        info!("Order created: {:?}", order);
+                    if let Some(trade) = engine.execute_tick().await {
+                        info!("Trade: {:?}", trade);
                     }
                     tokio::task::yield_now().await;
                 }

@@ -35,11 +35,6 @@ pub struct Trade {
     pub error_msg: Option<String>,
 }
 
-#[allow(dead_code)]
-pub struct ExecuteTickResult {
-    pub state: EngineState,
-    pub order: Option<Trade>,
-}
 
 // ---------------------------------------------------------------------------
 // State
@@ -152,7 +147,7 @@ impl<S: Strategy> StrategyEngine<S> {
     /// Returns `true` when the engine has reached its final state:
     /// - entry-only strategy placed a buy, or
     /// - entry+exit strategy completed the full round-trip.
-    pub async fn execute_tick(&mut self) -> ExecuteTickResult {
+    pub async fn execute_tick(&mut self) -> Option<Trade> {
         let ctx = self.snapshot();
 
         // 1. If in position and strategy manages exits — check exit (even during divergence)
@@ -160,20 +155,17 @@ impl<S: Strategy> StrategyEngine<S> {
             self.try_exit(&ctx).await;
 
             if self.state == EngineState::Idle {
-                return;
+                return None;
             }
         } */
 
         // 2. Killswitch — block new entries if exchanges diverge
         if self.check_killswitch(&ctx) {
-            return ExecuteTickResult {
-                state: self.state,
-                order: None,
-            };
+            return None;
         }
 
         // 3. Try buy
-        let order = if self.state == EngineState::Idle {
+        let trade = if self.state == EngineState::Idle {
             self.try_buy(&ctx).await
         } else {
             None
@@ -185,10 +177,7 @@ impl<S: Strategy> StrategyEngine<S> {
             info!("[{:?}]", self.state);
         }
 
-        ExecuteTickResult {
-            state: self.state,
-            order,
-        }
+        trade
     }
 
     // -----------------------------------------------------------------------
