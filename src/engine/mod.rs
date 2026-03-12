@@ -32,11 +32,9 @@ pub enum EngineState {
     InPosition,
 }
 
-#[allow(dead_code)]
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,
     pub paper_mode: bool,
-    pub asset: String,
     pub time_offset: i64,
     pub engine_config: EngineConfig,
 
@@ -69,7 +67,6 @@ impl<S: Strategy> StrategyEngine<S> {
     pub fn new(
         strategy: S,
         paper_mode: bool,
-        asset: String,
         time_offset: i64,
         engine_config: EngineConfig,
         binance_rx: watch::Receiver<(f64, i64)>,
@@ -83,7 +80,6 @@ impl<S: Strategy> StrategyEngine<S> {
         Self {
             strategy,
             paper_mode,
-            asset,
             time_offset,
             engine_config,
             client: None,
@@ -130,27 +126,16 @@ impl<S: Strategy> StrategyEngine<S> {
     // Tick — the main entry point
     // -----------------------------------------------------------------------
 
-    /// Returns `true` when the engine has reached its final state:
-    /// - entry-only strategy placed a buy, or
-    /// - entry+exit strategy completed the full round-trip.
+    /// Returns Some(Trade) when the strategy places an order.
     pub async fn execute_tick(&mut self) -> Option<Trade> {
         let ctx = self.snapshot();
 
-        // 1. If in position and strategy manages exits — check exit (even during divergence)
-        /* if self.state == EngineState::InPosition && self.strategy.manages_exit() {
-            self.try_exit(&ctx).await;
-
-            if self.state == EngineState::Idle {
-                return None;
-            }
-        } */
-
-        // 2. Killswitch — block new entries if exchanges diverge
+        // 1. Killswitch — block new entries if exchanges diverge
         if self.check_killswitch(&ctx) {
             return None;
         }
 
-        // 3. Try buy
+        // 2. Try buy
         let trade = if self.state == EngineState::Idle {
             self.try_buy(&ctx).await
         } else {
@@ -219,34 +204,6 @@ impl<S: Strategy> StrategyEngine<S> {
         }
         false
     }
-
-    /* async fn try_exit(&mut self, ctx: &TickContext) {
-        let Some(ref market) = ctx.market else { return };
-        let Some(ref token_id) = self.active_token_id.clone() else {
-            return;
-        };
-        let direction = if market.up.token_id == *token_id {
-            TokenDirection::Up
-        } else if market.down.token_id == *token_id {
-            TokenDirection::Down
-        } else {
-            return;
-        };
-        if let Some(order) = self.strategy.create_exit_order(ctx, self.position_size) {
-            match self.execute_sell(token_id, direction, &order).await {
-                Ok(resp) => {
-                    let success = resp.result.as_ref().map_or(true, |r| r.success);
-                    if success {
-                        self.clear_position();
-                    } else {
-                        let msg = resp.result.and_then(|r| r.error_msg).unwrap_or_default();
-                        error!("Sell rejected: {}. Staying InPosition.", msg);
-                    }
-                }
-                Err(e) => error!("Sell failed: {}. Staying InPosition.", e),
-            }
-        }
-    } */
 
     async fn try_buy(
         &mut self,
@@ -331,28 +288,6 @@ impl<S: Strategy> StrategyEngine<S> {
             error_msg,
         })
     }
-
-    /* async fn execute_sell(
-        &mut self,
-        token_id: &str,
-        direction: TokenDirection,
-        order: &OrderParams,
-    ) -> Result<Trade, String> {
-        let result = if !self.paper_mode {
-            let resp = self.sign_and_submit(token_id, order, Side::Sell).await?;
-            Some(ExecuteOrderResult {
-                order_id: resp.order_id,
-                success: resp.success,
-                making_amount: resp.making_amount,
-                taking_amount: resp.taking_amount,
-                error_msg: resp.error_msg,
-            })
-        } else {
-            None
-        };
-
-        Ok(Trade { side: Side::Sell, direction, order_params: order.clone(), result })
-    } */
 
     // -----------------------------------------------------------------------
     // SDK order signing
