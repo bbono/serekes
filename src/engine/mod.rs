@@ -54,7 +54,7 @@ pub enum EngineState {
 #[allow(dead_code)]
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,
-    pub trading_enabled: bool,
+    pub paper_mode: bool,
     pub asset: String,
     pub time_offset: i64,
     pub engine_config: EngineConfig,
@@ -87,7 +87,7 @@ pub struct StrategyEngine<S: Strategy> {
 impl<S: Strategy> StrategyEngine<S> {
     pub fn new(
         strategy: S,
-        trading_enabled: bool,
+        paper_mode: bool,
         asset: String,
         time_offset: i64,
         engine_config: EngineConfig,
@@ -101,7 +101,7 @@ impl<S: Strategy> StrategyEngine<S> {
     ) -> Self {
         Self {
             strategy,
-            trading_enabled,
+            paper_mode,
             asset,
             time_offset,
             engine_config,
@@ -293,7 +293,7 @@ impl<S: Strategy> StrategyEngine<S> {
                 }
 
                 // For paper trading only
-                if !self.trading_enabled {
+                if self.paper_mode {
                     match order {
                         OrderParams::Market { amount, .. } => {
                             let ask = match direction {
@@ -331,7 +331,7 @@ impl<S: Strategy> StrategyEngine<S> {
         direction: TokenDirection,
         order: &OrderParams,
     ) -> Result<ExecuteOrderResponse, String> {
-        let (order_id, success, error_msg, making, taking) = if self.trading_enabled {
+        let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
             match self.sign_and_submit(token_id, order, Side::Buy).await {
                 Ok(resp) => (
                     resp.order_id,
@@ -359,7 +359,7 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         let (price, size) =
-            if self.trading_enabled && success && matches!(order, OrderParams::Market { .. }) {
+            if !self.paper_mode && success && matches!(order, OrderParams::Market { .. }) {
                 let making_f64: f64 = making.try_into().unwrap_or(0.0);
                 let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
                 if taking_f64 > 0.0 {
@@ -389,7 +389,7 @@ impl<S: Strategy> StrategyEngine<S> {
         direction: TokenDirection,
         order: &OrderParams,
     ) -> Result<ExecuteOrderResponse, String> {
-        let result = if self.trading_enabled {
+        let result = if !self.paper_mode {
             let resp = self.sign_and_submit(token_id, order, Side::Sell).await?;
             Some(ExecuteOrderResult {
                 order_id: resp.order_id,
