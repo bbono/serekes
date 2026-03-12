@@ -1,4 +1,3 @@
-use polymarket_client_sdk::clob::types::Side;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -61,6 +60,13 @@ impl Market {
 // ---------------------------------------------------------------------------
 // Order types
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub enum Side {
+    Buy,
+    Sell,
+}
 
 /// Describes how to place an order. The engine signs and submits it
 /// to the Polymarket CLOB via the SDK.
