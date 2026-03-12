@@ -24,7 +24,7 @@ use tokio::sync::watch;
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct FillResult {
+pub struct Trade {
     pub side: Side,
     pub direction: TokenDirection,
     pub price: f64,
@@ -38,7 +38,7 @@ pub struct FillResult {
 #[allow(dead_code)]
 pub struct ExecuteTickResult {
     pub state: EngineState,
-    pub order: Option<FillResult>,
+    pub order: Option<Trade>,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ impl<S: Strategy> StrategyEngine<S> {
     async fn try_buy(
         &mut self,
         ctx: &TickContext,
-    ) -> Option<FillResult> {
+    ) -> Option<Trade> {
         let market = ctx.market.as_ref()?;
         let (direction, order) = self.strategy.create_entry_order(ctx)?;
         let token_id = match direction {
@@ -345,7 +345,7 @@ impl<S: Strategy> StrategyEngine<S> {
             error!("Buy rejected: {}", msg);
         }
 
-        Some(FillResult {
+        Some(Trade {
             side: Side::Buy,
             direction,
             price,
@@ -362,7 +362,7 @@ impl<S: Strategy> StrategyEngine<S> {
         token_id: &str,
         direction: TokenDirection,
         order: &OrderParams,
-    ) -> Result<FillResult, String> {
+    ) -> Result<Trade, String> {
         let result = if !self.paper_mode {
             let resp = self.sign_and_submit(token_id, order, Side::Sell).await?;
             Some(ExecuteOrderResult {
@@ -376,7 +376,7 @@ impl<S: Strategy> StrategyEngine<S> {
             None
         };
 
-        Ok(FillResult { side: Side::Sell, direction, order_params: order.clone(), result })
+        Ok(Trade { side: Side::Sell, direction, order_params: order.clone(), result })
     } */
 
     // -----------------------------------------------------------------------
