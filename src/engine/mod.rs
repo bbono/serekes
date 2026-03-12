@@ -5,13 +5,13 @@ pub use strategies::BonoStrategy;
 pub use traits::Strategy;
 
 use crate::config::EngineConfig;
-use crate::types::{Market, MarketOrderType, OrderParams, TickContext, TokenDirection, Trade};
+use crate::types::{Market, MarketOrderType, OrderParams, Side, TickContext, TokenDirection, Trade};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer as SDKSigner};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
-use polymarket_client_sdk::clob::types::{Amount, OrderType, Side, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, OrderType, Side as SdkSide, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::types::Decimal;
 use polymarket_client_sdk::POLYGON;
@@ -35,7 +35,7 @@ pub enum EngineState {
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,
     pub paper_mode: bool,
-    pub time_offset: i64,
+    pub time_offset_ms: i64,
     pub engine_config: EngineConfig,
 
     // Auth / SDK
@@ -67,7 +67,7 @@ impl<S: Strategy> StrategyEngine<S> {
     pub fn new(
         strategy: S,
         paper_mode: bool,
-        time_offset: i64,
+        time_offset_ms: i64,
         engine_config: EngineConfig,
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
@@ -80,7 +80,7 @@ impl<S: Strategy> StrategyEngine<S> {
         Self {
             strategy,
             paper_mode,
-            time_offset,
+            time_offset_ms,
             engine_config,
             client: None,
             signer_instance: None,
@@ -164,7 +164,7 @@ impl<S: Strategy> StrategyEngine<S> {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64
-            + (self.time_offset * 1000);
+            + self.time_offset_ms;
         let market = self
             .shared_market
             .lock()
@@ -218,7 +218,7 @@ impl<S: Strategy> StrategyEngine<S> {
 
         // --- Submit or simulate ---
         let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
-            match self.sign_and_submit(&token_id, &order, Side::Buy).await {
+            match self.sign_and_submit(&token_id, &order, SdkSide::Buy).await {
                 Ok(resp) => (
                     resp.order_id,
                     resp.success,
@@ -297,7 +297,7 @@ impl<S: Strategy> StrategyEngine<S> {
         &self,
         token_id: &str,
         order: &OrderParams,
-        side: Side,
+        side: SdkSide,
     ) -> Result<PostOrderResponse, String> {
         let (Some(ref client), Some(ref signer)) = (&self.client, &self.signer_instance) else {
             return Err("client not initialized".into());
@@ -335,7 +335,7 @@ impl<S: Strategy> StrategyEngine<S> {
                 if amount_dec <= Decimal::ZERO {
                     return Err(format!("Invalid amount={}", amount_dec));
                 }
-                let amt = if side == Side::Buy {
+                let amt = if side == SdkSide::Buy {
                     Amount::usdc(amount_dec)
                 } else {
                     Amount::shares(amount_dec)
