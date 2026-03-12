@@ -2,11 +2,10 @@ pub mod strategies;
 pub mod traits;
 
 pub use strategies::BonoStrategy;
-#[allow(unused_imports)]
-pub use traits::{OrderParams, Strategy, TickContext};
+pub use traits::Strategy;
 
 use crate::config::EngineConfig;
-use crate::types::{Market, TokenDirection};
+use crate::types::{Market, MarketOrderType, OrderParams, TickContext, TokenDirection, Trade};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
@@ -21,19 +20,6 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct Trade {
-    pub side: Side,
-    pub direction: TokenDirection,
-    pub price: f64,
-    pub size: f64,
-    pub order_params: OrderParams,
-    pub order_id: String,
-    pub success: bool,
-    pub error_msg: Option<String>,
-}
 
 
 // ---------------------------------------------------------------------------
@@ -395,8 +381,8 @@ impl<S: Strategy> StrategyEngine<S> {
                     return Err(format!("Invalid price={} or size={}", price_dec, size_dec));
                 }
                 let sdk_order_type = match order_type {
-                    traits::MarketOrderType::FAK => OrderType::FAK,
-                    traits::MarketOrderType::FOK => OrderType::FOK,
+                    MarketOrderType::FAK => OrderType::FAK,
+                    MarketOrderType::FOK => OrderType::FOK,
                 };
                 client
                     .limit_order()
@@ -422,8 +408,8 @@ impl<S: Strategy> StrategyEngine<S> {
                 .map_err(|e| format!("Invalid amount: {:?}", e))?;
 
                 let sdk_order_type = match order_type {
-                    traits::MarketOrderType::FAK => OrderType::FAK,
-                    traits::MarketOrderType::FOK => OrderType::FOK,
+                    MarketOrderType::FAK => OrderType::FAK,
+                    MarketOrderType::FOK => OrderType::FOK,
                 };
                 client
                     .market_order()

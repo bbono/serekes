@@ -1,5 +1,5 @@
-use crate::engine::traits::{MarketOrderType, OrderParams, Strategy, TickContext};
-use crate::types::TokenDirection;
+use crate::engine::traits::Strategy;
+use crate::types::{MarketOrderType, OrderParams, TickContext, TokenDirection};
 
 #[allow(dead_code)]
 pub struct BonoStrategy {}
