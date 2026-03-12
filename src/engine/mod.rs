@@ -154,15 +154,10 @@ impl<S: Strategy> StrategyEngine<S> {
     /// - entry+exit strategy completed the full round-trip.
     pub async fn execute_tick(&mut self) -> ExecuteTickResult {
         let ctx = self.snapshot();
-        let market = self
-            .shared_market
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
 
         // 1. If in position and strategy manages exits — check exit (even during divergence)
         /* if self.state == EngineState::InPosition && self.strategy.manages_exit() {
-            self.try_exit(&ctx, &market).await;
+            self.try_exit(&ctx).await;
 
             if self.state == EngineState::Idle {
                 return;
@@ -179,7 +174,7 @@ impl<S: Strategy> StrategyEngine<S> {
 
         // 3. Try buy
         let order = if self.state == EngineState::Idle {
-            self.try_buy(&ctx, &market).await
+            self.try_buy(&ctx).await
         } else {
             None
         };
@@ -210,6 +205,11 @@ impl<S: Strategy> StrategyEngine<S> {
             .unwrap()
             .as_millis() as i64
             + (self.time_offset * 1000);
+        let market = self
+            .shared_market
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         TickContext {
             binance_price,
@@ -220,6 +220,7 @@ impl<S: Strategy> StrategyEngine<S> {
             chainlink_ts,
             dvol,
             now_ms,
+            market,
             binance_history: self.binance_history.clone(),
             chainlink_history: self.chainlink_history.clone(),
         }
@@ -244,8 +245,8 @@ impl<S: Strategy> StrategyEngine<S> {
         false
     }
 
-    /* async fn try_exit(&mut self, ctx: &TickContext, market: &Option<Market>) {
-        let Some(ref market) = market else { return };
+    /* async fn try_exit(&mut self, ctx: &TickContext) {
+        let Some(ref market) = ctx.market else { return };
         let Some(ref token_id) = self.active_token_id.clone() else {
             return;
         };
@@ -256,7 +257,7 @@ impl<S: Strategy> StrategyEngine<S> {
         } else {
             return;
         };
-        if let Some(order) = self.strategy.create_exit_order(ctx, market, self.position_size) {
+        if let Some(order) = self.strategy.create_exit_order(ctx, self.position_size) {
             match self.execute_sell(token_id, direction, &order).await {
                 Ok(resp) => {
                     let success = resp.result.as_ref().map_or(true, |r| r.success);
@@ -275,10 +276,9 @@ impl<S: Strategy> StrategyEngine<S> {
     async fn try_buy(
         &mut self,
         ctx: &TickContext,
-        market: &Option<Market>,
     ) -> Option<ExecuteOrderResponse> {
-        let market = market.as_ref()?;
-        let (direction, order) = self.strategy.create_entry_order(ctx, market)?;
+        let market = ctx.market.as_ref()?;
+        let (direction, order) = self.strategy.create_entry_order(ctx)?;
         let token_id = match direction {
             TokenDirection::Up => market.up.token_id.clone(),
             TokenDirection::Down => market.down.token_id.clone(),

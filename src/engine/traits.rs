@@ -1,11 +1,11 @@
 use crate::types::{Market, TokenDirection};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-/// Snapshot of market state passed to strategy on every engine tick (1ms loop).
+/// Snapshot of all market state passed to strategy on every engine tick (1ms loop).
 ///
-/// The engine builds this from its WebSocket data feeds and risk monitors,
-/// so the strategy never touches raw watch receivers or infrastructure.
-/// All fields are copied values — no references, no async, pure data.
+/// The engine builds this from its WebSocket data feeds, shared market state,
+/// and risk monitors, so the strategy never touches raw watch receivers or
+/// infrastructure. All fields are copied values — no references, no async, pure data.
 #[allow(dead_code)]
 pub struct TickContext {
     /// Current BTC (or configured asset) spot price from Binance aggTrade stream.
@@ -28,6 +28,10 @@ pub struct TickContext {
 
     /// Current unix ms, adjusted for Polymarket server time offset.
     pub now_ms: i64,
+
+    /// Polymarket binary market snapshot (static metadata + live bid/ask from poly WS).
+    /// None if no market has been discovered yet.
+    pub market: Option<Market>,
 
     /// Recent binance price history: (price, timestamp_ms), oldest first.
     /// Lock only when needed — avoid holding across await points.
@@ -103,7 +107,6 @@ pub trait Strategy {
     fn create_entry_order(
         &self,
         ctx: &TickContext,
-        market: &Market,
     ) -> Option<(TokenDirection, OrderParams)>;
 
     /// Called each tick while holding a position.
@@ -112,7 +115,6 @@ pub trait Strategy {
     fn create_exit_order(
         &self,
         _ctx: &TickContext,
-        _market: &Market,
         _position_size: f64,
     ) -> Option<OrderParams> {
         None

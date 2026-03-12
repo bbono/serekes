@@ -1,5 +1,5 @@
 use crate::engine::traits::{MarketOrderType, OrderParams, Strategy, TickContext};
-use crate::types::{Market, TokenDirection};
+use crate::types::TokenDirection;
 
 #[allow(dead_code)]
 pub struct BonoStrategy {}
@@ -13,9 +13,9 @@ impl BonoStrategy {
 impl Strategy for BonoStrategy {
     fn create_entry_order(
         &self,
-        _ctx: &TickContext,
-        market: &Market,
+        ctx: &TickContext,
     ) -> Option<(TokenDirection, OrderParams)> {
+        let market = ctx.market.as_ref()?;
         let up_price = market.up.best_ask;
         let down_price = market.down.best_ask;
 
