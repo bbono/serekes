@@ -11,7 +11,7 @@
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
 4. Sync server time offset with Polymarket CLOB
 5. Init Telegram, build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
-6. Authenticate Polymarket SDK (if trading enabled)
+6. Authenticate Polymarket SDK (if private key present → live mode)
 7. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
 
 ```mermaid
@@ -231,7 +231,7 @@ log_level = "info"           # error/warn/info/debug/trace
 
 [wallet]
 key_file = ".key"            # Path to Polygon private key file
-trading_enabled = false      # Live execution vs monitor-only
+                             # Key present → LIVE mode, absent → PAPER mode
 
 [market]
 asset = "btc"                # btc/eth/sol/xrp

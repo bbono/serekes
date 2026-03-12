@@ -2,11 +2,10 @@ pub mod strategies;
 pub mod traits;
 
 pub use strategies::BonoStrategy;
-#[allow(unused_imports)]
-pub use traits::{OrderParams, Strategy, TickContext};
+pub use traits::Strategy;
 
 use crate::config::EngineConfig;
-use crate::types::{Market, TokenDirection};
+use crate::types::{Market, MarketOrderType, OrderParams, TickContext, TokenDirection, Trade};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
@@ -22,24 +21,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct ExecuteOrderResponse {
-    pub side: Side,
-    pub direction: TokenDirection,
-    pub price: f64,
-    pub size: f64,
-    pub order_params: OrderParams,
-    pub order_id: String,
-    pub success: bool,
-    pub error_msg: Option<String>,
-}
-
-#[allow(dead_code)]
-pub struct ExecuteTickResult {
-    pub state: EngineState,
-    pub order: Option<ExecuteOrderResponse>,
-}
 
 // ---------------------------------------------------------------------------
 // State
@@ -54,7 +35,7 @@ pub enum EngineState {
 #[allow(dead_code)]
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,
-    pub trading_enabled: bool,
+    pub paper_mode: bool,
     pub asset: String,
     pub time_offset: i64,
     pub engine_config: EngineConfig,
@@ -87,7 +68,7 @@ pub struct StrategyEngine<S: Strategy> {
 impl<S: Strategy> StrategyEngine<S> {
     pub fn new(
         strategy: S,
-        trading_enabled: bool,
+        paper_mode: bool,
         asset: String,
         time_offset: i64,
         engine_config: EngineConfig,
@@ -101,7 +82,7 @@ impl<S: Strategy> StrategyEngine<S> {
     ) -> Self {
         Self {
             strategy,
-            trading_enabled,
+            paper_mode,
             asset,
             time_offset,
             engine_config,
@@ -152,34 +133,26 @@ impl<S: Strategy> StrategyEngine<S> {
     /// Returns `true` when the engine has reached its final state:
     /// - entry-only strategy placed a buy, or
     /// - entry+exit strategy completed the full round-trip.
-    pub async fn execute_tick(&mut self) -> ExecuteTickResult {
+    pub async fn execute_tick(&mut self) -> Option<Trade> {
         let ctx = self.snapshot();
-        let market = self
-            .shared_market
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
 
         // 1. If in position and strategy manages exits — check exit (even during divergence)
         /* if self.state == EngineState::InPosition && self.strategy.manages_exit() {
-            self.try_exit(&ctx, &market).await;
+            self.try_exit(&ctx).await;
 
             if self.state == EngineState::Idle {
-                return;
+                return None;
             }
         } */
 
         // 2. Killswitch — block new entries if exchanges diverge
         if self.check_killswitch(&ctx) {
-            return ExecuteTickResult {
-                state: self.state,
-                order: None,
-            };
+            return None;
         }
 
         // 3. Try buy
-        let order = if self.state == EngineState::Idle {
-            self.try_buy(&ctx, &market).await
+        let trade = if self.state == EngineState::Idle {
+            self.try_buy(&ctx).await
         } else {
             None
         };
@@ -190,10 +163,7 @@ impl<S: Strategy> StrategyEngine<S> {
             info!("[{:?}]", self.state);
         }
 
-        ExecuteTickResult {
-            state: self.state,
-            order,
-        }
+        trade
     }
 
     // -----------------------------------------------------------------------
@@ -210,6 +180,11 @@ impl<S: Strategy> StrategyEngine<S> {
             .unwrap()
             .as_millis() as i64
             + (self.time_offset * 1000);
+        let market = self
+            .shared_market
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         TickContext {
             binance_price,
@@ -220,6 +195,7 @@ impl<S: Strategy> StrategyEngine<S> {
             chainlink_ts,
             dvol,
             now_ms,
+            market,
             binance_history: self.binance_history.clone(),
             chainlink_history: self.chainlink_history.clone(),
         }
@@ -244,8 +220,8 @@ impl<S: Strategy> StrategyEngine<S> {
         false
     }
 
-    /* async fn try_exit(&mut self, ctx: &TickContext, market: &Option<Market>) {
-        let Some(ref market) = market else { return };
+    /* async fn try_exit(&mut self, ctx: &TickContext) {
+        let Some(ref market) = ctx.market else { return };
         let Some(ref token_id) = self.active_token_id.clone() else {
             return;
         };
@@ -256,7 +232,7 @@ impl<S: Strategy> StrategyEngine<S> {
         } else {
             return;
         };
-        if let Some(order) = self.strategy.create_exit_order(ctx, market, self.position_size) {
+        if let Some(order) = self.strategy.create_exit_order(ctx, self.position_size) {
             match self.execute_sell(token_id, direction, &order).await {
                 Ok(resp) => {
                     let success = resp.result.as_ref().map_or(true, |r| r.success);
@@ -275,64 +251,17 @@ impl<S: Strategy> StrategyEngine<S> {
     async fn try_buy(
         &mut self,
         ctx: &TickContext,
-        market: &Option<Market>,
-    ) -> Option<ExecuteOrderResponse> {
-        let market = market.as_ref()?;
-        let (direction, order) = self.strategy.create_entry_order(ctx, market)?;
+    ) -> Option<Trade> {
+        let market = ctx.market.as_ref()?;
+        let (direction, order) = self.strategy.create_entry_order(ctx)?;
         let token_id = match direction {
             TokenDirection::Up => market.up.token_id.clone(),
             TokenDirection::Down => market.down.token_id.clone(),
         };
-        match self.execute_buy(&token_id, direction, &order).await {
-            Ok(mut resp) => {
-                if resp.success {
-                    self.state = EngineState::InPosition;
-                } else {
-                    let msg = resp.error_msg.as_deref().unwrap_or_default();
-                    error!("Buy rejected: {}", msg);
-                }
 
-                // For paper trading only
-                if !self.trading_enabled {
-                    match order {
-                        OrderParams::Market { amount, .. } => {
-                            let ask = match direction {
-                                TokenDirection::Up => market.up.best_ask,
-                                TokenDirection::Down => market.down.best_ask,
-                            };
-                            if ask > 0.0 {
-                                resp.price = ask;
-                                resp.size = amount / ask;
-                            }
-                        }
-                        OrderParams::Limit { price, size, .. } => {
-                            resp.price = price;
-                            resp.size = size;
-                        }
-                    }
-                }
-
-                Some(resp)
-            }
-            Err(e) => {
-                error!("Buy failed: {}", e);
-                None
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Order execution
-    // -----------------------------------------------------------------------
-
-    async fn execute_buy(
-        &mut self,
-        token_id: &str,
-        direction: TokenDirection,
-        order: &OrderParams,
-    ) -> Result<ExecuteOrderResponse, String> {
-        let (order_id, success, error_msg, making, taking) = if self.trading_enabled {
-            match self.sign_and_submit(token_id, order, Side::Buy).await {
+        // --- Submit or simulate ---
+        let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
+            match self.sign_and_submit(&token_id, &order, Side::Buy).await {
                 Ok(resp) => (
                     resp.order_id,
                     resp.success,
@@ -340,13 +269,10 @@ impl<S: Strategy> StrategyEngine<S> {
                     resp.making_amount,
                     resp.taking_amount,
                 ),
-                Err(e) => (
-                    String::new(),
-                    false,
-                    Some(e),
-                    Decimal::default(),
-                    Decimal::default(),
-                ),
+                Err(e) => {
+                    error!("Buy failed: {}", e);
+                    return None;
+                }
             }
         } else {
             (
@@ -358,25 +284,48 @@ impl<S: Strategy> StrategyEngine<S> {
             )
         };
 
-        let (price, size) =
-            if self.trading_enabled && success && matches!(order, OrderParams::Market { .. }) {
-                let making_f64: f64 = making.try_into().unwrap_or(0.0);
-                let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
-                if taking_f64 > 0.0 {
-                    (making_f64 / taking_f64, taking_f64)
-                } else {
-                    (0.0, 0.0)
+        // --- Resolve fill price/size ---
+        let (price, size) = if self.paper_mode {
+            match order {
+                OrderParams::Market { amount, .. } => {
+                    let ask = match direction {
+                        TokenDirection::Up => market.up.best_ask,
+                        TokenDirection::Down => market.down.best_ask,
+                    };
+                    if ask > 0.0 {
+                        (ask, amount / ask)
+                    } else {
+                        order.price_and_size()
+                    }
                 }
+                OrderParams::Limit { price, size, .. } => (price, size),
+            }
+        } else if success && matches!(order, OrderParams::Market { .. }) {
+            let making_f64: f64 = making.try_into().unwrap_or(0.0);
+            let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
+            if taking_f64 > 0.0 {
+                (making_f64 / taking_f64, taking_f64)
             } else {
-                order.price_and_size()
-            };
+                (0.0, 0.0)
+            }
+        } else {
+            order.price_and_size()
+        };
 
-        Ok(ExecuteOrderResponse {
+        // --- Update state ---
+        if success {
+            self.state = EngineState::InPosition;
+        } else {
+            let msg = error_msg.as_deref().unwrap_or_default();
+            error!("Buy rejected: {}", msg);
+        }
+
+        Some(Trade {
             side: Side::Buy,
             direction,
             price,
             size,
-            order_params: order.clone(),
+            order_params: order,
             order_id,
             success,
             error_msg,
@@ -388,8 +337,8 @@ impl<S: Strategy> StrategyEngine<S> {
         token_id: &str,
         direction: TokenDirection,
         order: &OrderParams,
-    ) -> Result<ExecuteOrderResponse, String> {
-        let result = if self.trading_enabled {
+    ) -> Result<Trade, String> {
+        let result = if !self.paper_mode {
             let resp = self.sign_and_submit(token_id, order, Side::Sell).await?;
             Some(ExecuteOrderResult {
                 order_id: resp.order_id,
@@ -402,7 +351,7 @@ impl<S: Strategy> StrategyEngine<S> {
             None
         };
 
-        Ok(ExecuteOrderResponse { side: Side::Sell, direction, order_params: order.clone(), result })
+        Ok(Trade { side: Side::Sell, direction, order_params: order.clone(), result })
     } */
 
     // -----------------------------------------------------------------------
@@ -432,8 +381,8 @@ impl<S: Strategy> StrategyEngine<S> {
                     return Err(format!("Invalid price={} or size={}", price_dec, size_dec));
                 }
                 let sdk_order_type = match order_type {
-                    traits::MarketOrderType::FAK => OrderType::FAK,
-                    traits::MarketOrderType::FOK => OrderType::FOK,
+                    MarketOrderType::FAK => OrderType::FAK,
+                    MarketOrderType::FOK => OrderType::FOK,
                 };
                 client
                     .limit_order()
@@ -459,8 +408,8 @@ impl<S: Strategy> StrategyEngine<S> {
                 .map_err(|e| format!("Invalid amount: {:?}", e))?;
 
                 let sdk_order_type = match order_type {
-                    traits::MarketOrderType::FAK => OrderType::FAK,
-                    traits::MarketOrderType::FOK => OrderType::FOK,
+                    MarketOrderType::FAK => OrderType::FAK,
+                    MarketOrderType::FOK => OrderType::FOK,
                 };
                 client
                     .market_order()

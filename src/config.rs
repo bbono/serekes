@@ -20,15 +20,12 @@ pub struct AppConfig {
 pub struct WalletConfig {
     #[serde(default = "default_key_file")]
     pub key_file: String,
-    #[serde(default)]
-    pub trading_enabled: bool,
 }
 
 impl Default for WalletConfig {
     fn default() -> Self {
         Self {
             key_file: default_key_file(),
-            trading_enabled: false,
         }
     }
 }

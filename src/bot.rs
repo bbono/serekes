@@ -543,7 +543,6 @@ async fn main() {
         })
         .init();
 
-    let trading_enabled = config.wallet.trading_enabled;
     let market_asset = config.market.asset.to_lowercase();
     let private_key = match std::fs::read_to_string(&config.wallet.key_file) {
         Ok(contents) => {
@@ -561,16 +560,16 @@ async fn main() {
         }
     };
 
-    if trading_enabled {
-        info!("Trading ENABLED. Verifying credentials...");
-        if private_key.is_none() {
-            warn!("trading_enabled but private_key missing!");
-        }
+    let paper_mode = private_key.is_none();
+    if paper_mode {
+        info!("PAPER mode (no private key found)");
+    } else {
+        info!("LIVE mode (private key loaded)");
     }
     info!(
-        "Starting Serekeš [{}] | trading={}",
+        "Starting Serekeš [{}] | mode={}",
         market_asset.to_uppercase(),
-        trading_enabled
+        if paper_mode { "paper" } else { "live" }
     );
 
     // --- Data broadcast channels ---
@@ -611,7 +610,7 @@ async fn main() {
     let strategy = BonoStrategy::new();
     let mut engine = StrategyEngine::new(
         strategy,
-        trading_enabled,
+        paper_mode,
         market_asset.clone(),
         time_offset,
         config.engine.clone(),
@@ -624,7 +623,7 @@ async fn main() {
         chainlink_history.clone(),
     );
 
-    if trading_enabled {
+    if !paper_mode {
         if let Some(pk) = private_key {
             if engine.initialize_client(&pk).await {
                 info!("Polymarket SDK authenticated.");
@@ -695,10 +694,8 @@ async fn main() {
                     if now_secs() * 1000 > info.expires_ms + 1000 {
                         break;
                     }
-                    let result = engine.execute_tick().await;
-
-                    if let Some(order) = result.order {
-                        info!("Order created: {:?}", order);
+                    if let Some(trade) = engine.execute_tick().await {
+                        info!("Trade: {:?}", trade);
                     }
                     tokio::task::yield_now().await;
                 }

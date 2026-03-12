@@ -3,9 +3,9 @@ log_level = "info"
 
 [wallet]
 # Path to file containing the Polygon wallet private key (default: ".key")
+# If the key file exists and contains a valid key, bot runs in LIVE mode
+# If the key file is missing or empty, bot runs in PAPER mode
 key_file = ".key"
-# Enable/disable live order execution. When false, bot runs in monitor-only mode (default: false)
-trading_enabled = false
 
 [market]
 # Asset to trade (used for Polymarket slug and Binance/Coinbase price feeds)
