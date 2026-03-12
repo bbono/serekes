@@ -283,56 +283,10 @@ impl<S: Strategy> StrategyEngine<S> {
             TokenDirection::Up => market.up.token_id.clone(),
             TokenDirection::Down => market.down.token_id.clone(),
         };
-        match self.execute_buy(&token_id, direction, &order).await {
-            Ok(mut resp) => {
-                if resp.success {
-                    self.state = EngineState::InPosition;
-                } else {
-                    let msg = resp.error_msg.as_deref().unwrap_or_default();
-                    error!("Buy rejected: {}", msg);
-                }
 
-                // For paper trading only
-                if self.paper_mode {
-                    match order {
-                        OrderParams::Market { amount, .. } => {
-                            let ask = match direction {
-                                TokenDirection::Up => market.up.best_ask,
-                                TokenDirection::Down => market.down.best_ask,
-                            };
-                            if ask > 0.0 {
-                                resp.price = ask;
-                                resp.size = amount / ask;
-                            }
-                        }
-                        OrderParams::Limit { price, size, .. } => {
-                            resp.price = price;
-                            resp.size = size;
-                        }
-                    }
-                }
-
-                Some(resp)
-            }
-            Err(e) => {
-                error!("Buy failed: {}", e);
-                None
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Order execution
-    // -----------------------------------------------------------------------
-
-    async fn execute_buy(
-        &mut self,
-        token_id: &str,
-        direction: TokenDirection,
-        order: &OrderParams,
-    ) -> Result<ExecuteOrderResponse, String> {
+        // --- Submit or simulate ---
         let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
-            match self.sign_and_submit(token_id, order, Side::Buy).await {
+            match self.sign_and_submit(&token_id, &order, Side::Buy).await {
                 Ok(resp) => (
                     resp.order_id,
                     resp.success,
@@ -340,13 +294,10 @@ impl<S: Strategy> StrategyEngine<S> {
                     resp.making_amount,
                     resp.taking_amount,
                 ),
-                Err(e) => (
-                    String::new(),
-                    false,
-                    Some(e),
-                    Decimal::default(),
-                    Decimal::default(),
-                ),
+                Err(e) => {
+                    error!("Buy failed: {}", e);
+                    return None;
+                }
             }
         } else {
             (
@@ -358,25 +309,48 @@ impl<S: Strategy> StrategyEngine<S> {
             )
         };
 
-        let (price, size) =
-            if !self.paper_mode && success && matches!(order, OrderParams::Market { .. }) {
-                let making_f64: f64 = making.try_into().unwrap_or(0.0);
-                let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
-                if taking_f64 > 0.0 {
-                    (making_f64 / taking_f64, taking_f64)
-                } else {
-                    (0.0, 0.0)
+        // --- Resolve fill price/size ---
+        let (price, size) = if self.paper_mode {
+            match order {
+                OrderParams::Market { amount, .. } => {
+                    let ask = match direction {
+                        TokenDirection::Up => market.up.best_ask,
+                        TokenDirection::Down => market.down.best_ask,
+                    };
+                    if ask > 0.0 {
+                        (ask, amount / ask)
+                    } else {
+                        order.price_and_size()
+                    }
                 }
+                OrderParams::Limit { price, size, .. } => (price, size),
+            }
+        } else if success && matches!(order, OrderParams::Market { .. }) {
+            let making_f64: f64 = making.try_into().unwrap_or(0.0);
+            let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
+            if taking_f64 > 0.0 {
+                (making_f64 / taking_f64, taking_f64)
             } else {
-                order.price_and_size()
-            };
+                (0.0, 0.0)
+            }
+        } else {
+            order.price_and_size()
+        };
 
-        Ok(ExecuteOrderResponse {
+        // --- Update state ---
+        if success {
+            self.state = EngineState::InPosition;
+        } else {
+            let msg = error_msg.as_deref().unwrap_or_default();
+            error!("Buy rejected: {}", msg);
+        }
+
+        Some(ExecuteOrderResponse {
             side: Side::Buy,
             direction,
             price,
             size,
-            order_params: order.clone(),
+            order_params: order,
             order_id,
             success,
             error_msg,
