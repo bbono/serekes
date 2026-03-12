@@ -2,12 +2,10 @@
 log_level = "info"
 
 [wallet]
-# Polygon wallet private key used for signing Polymarket orders (default: "")
-private_key = "0x42f2a8435c6e9d80d67a357ec6ce7c78775979d3b14a6d3c1e6e1d3f12e0b3aa"
+# Path to file containing the Polygon wallet private key (default: ".key")
+key_file = ".key"
 # Enable/disable live order execution. When false, bot runs in monitor-only mode (default: false)
-trading_enabled = true
-# Polygon RPC endpoint for on-chain interactions (default: "https://polygon-rpc.com")
-polygon_rpc_url = "https://polygon-rpc.com"
+trading_enabled = false
 
 [market]
 # Asset to trade (used for Polymarket slug and Binance/Coinbase price feeds)
@@ -22,13 +20,11 @@ interval_minutes = 5
 # If exceeded, all trading activity is halted (default: 50.0)
 exchange_price_divergence_threshold = 50.0
 # Minimum seconds between engine log outputs, supports decimals (default: 0.5)
-log_interval_secs = 0.5
+log_interval_secs = 1
 
 # Strategy-specific config. Each strategy has its own section.
 [strategy.bono]
-# Seconds after market start before placing entry (default: 10.0)
-delay_secs = 10.0
-# USDC budget per trade (default: 3.0)
+# USDC budget per trade (default: 1.0)
 budget = 1.0
 
 [telegram]

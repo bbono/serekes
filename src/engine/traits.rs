@@ -1,6 +1,6 @@
+use crate::types::{Market, TokenDirection};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use crate::types::{Market, TokenDirection};
 /// Snapshot of market state passed to strategy on every engine tick (1ms loop).
 ///
 /// The engine builds this from its WebSocket data feeds and risk monitors,
@@ -43,6 +43,7 @@ pub struct TickContext {
 ///
 /// The strategy chooses the order type; the engine handles signing,
 /// Decimal conversion, and error recovery.
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum OrderParams {
     /// Limit order — placed via `client.limit_order()`.
@@ -54,21 +55,21 @@ pub enum OrderParams {
     ///
     /// `size`: number of shares (must be >= min order size on Polymarket,
     ///   currently 5.0 shares). Rounded to 2 decimal places by the engine.
-    Limit { price: f64, size: f64 },
+    Limit {
+        price: f64,
+        size: f64,
+        order_type: MarketOrderType,
+    },
 
     /// Market order — placed via `client.market_order()`.
     /// Fills immediately against resting orders at best available price.
     ///
     /// `amount`: for buy orders this is the USDC amount to spend.
     ///   For sell orders this is the number of shares to sell.
-    ///   The engine passes it to `Amount::usdc()` or `Amount::shares()`
-    ///   depending on the side.
     ///
-    /// `price`: optional worst-case price. If None, SDK calculates from orderbook.
     /// `order_type`: FAK (fill-and-kill, default) or FOK (fill-or-kill).
     Market {
         amount: f64,
-        price: Option<f64>,
         order_type: MarketOrderType,
     },
 }
@@ -91,7 +92,7 @@ impl OrderParams {
     /// the engine reconciles the actual fill via on-chain position check.
     pub fn price_and_size(&self) -> (f64, f64) {
         match self {
-            OrderParams::Limit { price, size } => (*price, *size),
+            OrderParams::Limit { price, size, .. } => (*price, *size),
             OrderParams::Market { amount, .. } => (*amount, *amount),
         }
     }
@@ -99,13 +100,28 @@ impl OrderParams {
 
 pub trait Strategy {
     /// Called each tick when idle. Return Some((direction, order)) to buy.
-    fn check_entry(&self, ctx: &TickContext, market: &Market) -> Option<(TokenDirection, OrderParams)>;
+    fn create_entry_order(
+        &self,
+        ctx: &TickContext,
+        market: &Market,
+    ) -> Option<(TokenDirection, OrderParams)>;
 
     /// Called each tick while holding a position.
     /// Return Some(OrderParams) to sell, None to keep holding.
-    fn check_exit(&self, _ctx: &TickContext, _market: &Market, _position_size: f64) -> Option<OrderParams> { None }
+    #[allow(dead_code)]
+    fn create_exit_order(
+        &self,
+        _ctx: &TickContext,
+        _market: &Market,
+        _position_size: f64,
+    ) -> Option<OrderParams> {
+        None
+    }
 
     /// Whether this strategy manages its own exit logic.
     /// If false, the engine considers itself done immediately after entry.
-    fn manages_exit(&self) -> bool { false }
+    #[allow(dead_code)]
+    fn manages_exit(&self) -> bool {
+        false
+    }
 }

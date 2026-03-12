@@ -1,6 +1,6 @@
 mod types;
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma;
@@ -223,6 +223,7 @@ fn spawn_chainlink_ws(
 fn spawn_poly_price_ws(
     shared: Arc<Mutex<Option<Market>>>,
     token_ids: Vec<String>,
+    connected: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -236,6 +237,7 @@ fn spawn_poly_price_ws(
                 }
             };
             info!("Connected to Polymarket Price WS");
+            connected.notify_one();
             let mut stream = Box::pin(stream);
 
             while let Some(result) = stream.next().await {
@@ -341,6 +343,7 @@ struct MarketInfo {
     started_ms: i64,
     expires_ms: i64,
     strike_binance: f64,
+    strike_chainlink: f64
 }
 
 async fn fetch_active_market(
@@ -369,7 +372,12 @@ async fn fetch_active_market(
 
     for ts in timestamps_to_check {
         let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts);
-        info!("Fetching event by slug: {}", slug);
+
+        info!(
+            "Discovering active {} {}m market...",
+            asset.to_uppercase(),
+            interval_minutes
+        );
 
         let request = gamma::types::request::EventBySlugRequest::builder()
             .slug(&slug)
@@ -401,11 +409,10 @@ async fn fetch_active_market(
                         && expires_at_ms > now_secs() * 1000
                     {
                         info!(
-                            "{} {}m market found: UP={} DOWN={}",
+                            "Found {} {}m market {}",
                             asset.to_uppercase(),
                             interval_minutes,
-                            up_token,
-                            down_token
+                            slug
                         );
 
                         return Ok(MarketInfo {
@@ -415,6 +422,7 @@ async fn fetch_active_market(
                             started_ms: started_at_ms,
                             expires_ms: expires_at_ms,
                             strike_binance,
+                            strike_chainlink: 0.0,
                         });
                     }
                 }
@@ -537,10 +545,20 @@ async fn main() {
 
     let trading_enabled = config.wallet.trading_enabled;
     let market_asset = config.market.asset.to_lowercase();
-    let private_key = if config.wallet.private_key.is_empty() {
-        None
-    } else {
-        Some(config.wallet.private_key.clone())
+    let private_key = match std::fs::read_to_string(&config.wallet.key_file) {
+        Ok(contents) => {
+            let key = contents.trim().to_string();
+            if key.is_empty() {
+                None
+            } else {
+                info!("Loaded private key from {}", config.wallet.key_file);
+                Some(key)
+            }
+        }
+        Err(_) => {
+            debug!("Key file not found: {}", config.wallet.key_file);
+            None
+        }
     };
 
     if trading_enabled {
@@ -550,7 +568,7 @@ async fn main() {
         }
     }
     info!(
-        "Starting PolyRustBot [{}] | trading={}",
+        "Starting Serekeš [{}] | trading={}",
         market_asset.to_uppercase(),
         trading_enabled
     );
@@ -589,11 +607,8 @@ async fn main() {
     // --- Time synchronization ---
     let time_offset = sync_time_offset().await;
 
-    // --- Telegram ---
-    telegram::init(config.telegram.clone());
-
     // --- Strategy engine ---
-    let strategy = BonoStrategy::new(config.strategy.bono.clone());
+    let strategy = BonoStrategy::new();
     let mut engine = StrategyEngine::new(
         strategy,
         trading_enabled,
@@ -628,10 +643,9 @@ async fn main() {
             wait_for_feeds(&engine).await;
 
             // === MARKET ROTATION LOOP ===
-            let mut processed_market_slug: Option<String> = None;
             loop {
                 // 1. Discover market
-                let info = loop {
+                let mut info = loop {
                     match fetch_active_market(&market_asset, interval_minutes).await {
                         Ok(result) => break result,
                         Err(e) => {
@@ -641,13 +655,8 @@ async fn main() {
                     }
                 };
 
-                // Skip if already processed this market
-                if processed_market_slug.as_deref() == Some(&info.slug) {
-                    sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-
                 // 2. Wait up to 10s for chainlink strike price, then skip market
+                info!("Searching strike price for market {}...", info.slug);
                 let deadline_ms = info.started_ms + 10_000;
                 let strike_chainlink = loop {
                     let price = lookup_chainlink_strike(&chainlink_history, info.started_ms);
@@ -659,54 +668,44 @@ async fn main() {
                     }
                     sleep(Duration::from_millis(100)).await;
                 };
-                // TODO
+                // TODO - it should be == 0
                 if strike_chainlink == 1900.0 {
                     let wait_secs = (info.expires_ms / 1000).saturating_sub(now_secs()).max(1) as u64;
-                    warn!("No strike price for {}. Skipping market.", info.slug);
+                    warn!("No strike price for market {}. Skipping market.", info.slug);
                     sleep(Duration::from_secs(wait_secs)).await;
                     continue;
-                }
-
-                // 3. Update shared market state
-                {
-                    let mut guard = shared_market.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut m = Market::new(
-                        info.slug.clone(), info.up_token.clone(), info.down_token.clone(),
-                        info.started_ms, info.expires_ms, info.strike_binance,
-                    );
-                    m.strike_price = strike_chainlink;
-                    *guard = Some(m);
+                } else {
+                    info.strike_chainlink = strike_chainlink;
+                    info!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Strike price is {:.2} for market {}...", strike_chainlink, info.slug);
                 }
 
                 // 4. Spawn Polymarket price WS for this market
+                info!("Connecting to Polymarket Price WS for market {}...", info.slug);
+                let poly_connected = Arc::new(tokio::sync::Notify::new());
                 let price_handle = spawn_poly_price_ws(
                     shared_market.clone(),
                     vec![info.up_token.clone(), info.down_token.clone()],
+                    poly_connected.clone(),
                 );
-
-                info!("Market active: {} | expires={}ms", info.slug, info.expires_ms);
+                poly_connected.notified().await;
 
                 // 5. Tick loop until market expires
-                info!("Engine starting to process market {}.", info.slug);
+                info!("--->>> Entering market {}.", info.slug);
                 loop {
                     if now_secs() * 1000 > info.expires_ms + 1000 {
                         break;
                     }
-                    if engine.execute_tick().await {
-                        processed_market_slug = Some(info.slug.clone());
-                        let remaining_ms = (info.expires_ms + 5000) - (now_secs() * 1000);
-                        if remaining_ms > 0 {
-                            info!("Engine done. Waiting {}s for market {} to expire.", remaining_ms / 1000, info.slug);
-                            sleep(Duration::from_millis(remaining_ms as u64)).await;
-                        }
-                        break;
+                    let result = engine.execute_tick().await;
+
+                    if let Some(order) = result.order {
+                        info!("Order created: {:?}", order);
                     }
                     tokio::task::yield_now().await;
                 }
+                info!("<<<--- Exiting market {}.", info.slug);
 
                 // 6. Cleanup
                 price_handle.abort();
-                info!("Market {} expired. Rotating...", info.slug);
             }
         } => {},
         _ = tokio::signal::ctrl_c() => {

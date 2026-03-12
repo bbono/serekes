@@ -12,15 +12,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub engine: EngineConfig,
     #[serde(default)]
-    pub strategy: StrategyConfigs,
-    #[serde(default)]
+    #[allow(dead_code)]
     pub telegram: TelegramConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WalletConfig {
-    #[serde(default)]
-    pub private_key: String,
+    #[serde(default = "default_key_file")]
+    pub key_file: String,
     #[serde(default)]
     pub trading_enabled: bool,
 }
@@ -28,7 +27,7 @@ pub struct WalletConfig {
 impl Default for WalletConfig {
     fn default() -> Self {
         Self {
-            private_key: String::new(),
+            key_file: default_key_file(),
             trading_enabled: false,
         }
     }
@@ -69,13 +68,8 @@ impl Default for EngineConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct StrategyConfigs {
-    #[serde(default)]
-    pub bono: crate::engine::strategies::bono::BonoStrategyConfig,
-}
-
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct TelegramConfig {
     #[serde(default)]
     pub bot_token: String,
@@ -92,6 +86,7 @@ impl Default for TelegramConfig {
     }
 }
 
+fn default_key_file() -> String { ".key".to_string() }
 fn default_log_level() -> String { "info".to_string() }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }

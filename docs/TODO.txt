@@ -1,3 +1,0 @@
-1. Crash recovery
-2. Limit Order
-3. Sell

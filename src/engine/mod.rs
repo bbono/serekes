@@ -6,21 +6,40 @@ pub use strategies::BonoStrategy;
 pub use traits::{OrderParams, Strategy, TickContext};
 
 use crate::config::EngineConfig;
-use crate::telegram;
 use crate::types::{Market, TokenDirection};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer as SDKSigner};
+use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk::clob::types::{Amount, OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::types::Decimal;
 use polymarket_client_sdk::POLYGON;
-use std::str::FromStr;
 use std::collections::VecDeque;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ExecuteOrderResponse {
+    pub side: Side,
+    pub direction: TokenDirection,
+    pub price: f64,
+    pub size: f64,
+    pub order_params: OrderParams,
+    pub order_id: String,
+    pub success: bool,
+    pub error_msg: Option<String>,
+}
+
+#[allow(dead_code)]
+pub struct ExecuteTickResult {
+    pub state: EngineState,
+    pub order: Option<ExecuteOrderResponse>,
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -46,15 +65,10 @@ pub struct StrategyEngine<S: Strategy> {
 
     // State machine
     state: EngineState,
-    entry_failed: bool,
-    active_token_id: Option<String>,
-    active_direction: Option<TokenDirection>,
-    entry_price: f64,
-    position_size: f64,
 
     // Loop counters
-    last_oracle_log: i64,
-    last_killswitch_log: i64,
+    last_killswitch_log_ts: i64,
+    last_engine_state_log_ts: i64,
 
     // Watch Receivers
     pub binance_rx: watch::Receiver<(f64, i64)>,
@@ -94,13 +108,8 @@ impl<S: Strategy> StrategyEngine<S> {
             client: None,
             signer_instance: None,
             state: EngineState::Idle,
-            entry_failed: false,
-            active_token_id: None,
-            active_direction: None,
-            entry_price: 0.0,
-            position_size: 0.0,
-            last_oracle_log: 0,
-            last_killswitch_log: 0,
+            last_killswitch_log_ts: 0,
+            last_engine_state_log_ts: 0,
             binance_rx,
             coinbase_rx,
             chainlink_rx,
@@ -143,7 +152,7 @@ impl<S: Strategy> StrategyEngine<S> {
     /// Returns `true` when the engine has reached its final state:
     /// - entry-only strategy placed a buy, or
     /// - entry+exit strategy completed the full round-trip.
-    pub async fn execute_tick(&mut self) -> bool {
+    pub async fn execute_tick(&mut self) -> ExecuteTickResult {
         let ctx = self.snapshot();
         let market = self
             .shared_market
@@ -152,36 +161,39 @@ impl<S: Strategy> StrategyEngine<S> {
             .clone();
 
         // 1. If in position and strategy manages exits — check exit (even during divergence)
-        if self.state == EngineState::InPosition && self.strategy.manages_exit() {
+        /* if self.state == EngineState::InPosition && self.strategy.manages_exit() {
             self.try_exit(&ctx, &market).await;
-            // Just exited → done
+
             if self.state == EngineState::Idle {
-                return true;
+                return;
             }
-        }
+        } */
 
         // 2. Killswitch — block new entries if exchanges diverge
         if self.check_killswitch(&ctx) {
-            return false;
+            return ExecuteTickResult {
+                state: self.state,
+                order: None,
+            };
         }
 
-        // 3. If idle and haven't already failed — check entry
-        if self.state == EngineState::Idle && !self.entry_failed {
-            self.try_entry(&ctx, &market).await;
-            // Entry failed → done
-            if self.entry_failed {
-                return true;
-            }
-            // Just entered and strategy doesn't manage exits → done
-            if self.state == EngineState::InPosition && !self.strategy.manages_exit() {
-                self.clear_position();
-                return true;
-            }
+        // 3. Try buy
+        let order = if self.state == EngineState::Idle {
+            self.try_buy(&ctx, &market).await
+        } else {
+            None
+        };
+
+        let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
+        if ctx.now_ms - self.last_engine_state_log_ts >= log_interval_ms {
+            self.last_engine_state_log_ts = ctx.now_ms;
+            info!("[{:?}]", self.state);
         }
 
-        // 4. Periodic status log
-        self.log_status(&ctx);
-        false
+        ExecuteTickResult {
+            state: self.state,
+            order,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -220,8 +232,8 @@ impl<S: Strategy> StrategyEngine<S> {
             && ctx.binance_price > 0.0
         {
             let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
-            if ctx.now_ms - self.last_killswitch_log >= log_interval_ms {
-                self.last_killswitch_log = ctx.now_ms;
+            if ctx.now_ms - self.last_killswitch_log_ts >= log_interval_ms {
+                self.last_killswitch_log_ts = ctx.now_ms;
                 warn!(
                     "Killswitch! Binance=${:.2} Coinbase=${:.2} divergence=${:.2}",
                     ctx.binance_price, ctx.coinbase_price, divergence
@@ -232,39 +244,79 @@ impl<S: Strategy> StrategyEngine<S> {
         false
     }
 
-    async fn try_exit(&mut self, ctx: &TickContext, market: &Option<Market>) {
+    /* async fn try_exit(&mut self, ctx: &TickContext, market: &Option<Market>) {
         let Some(ref market) = market else { return };
         let Some(ref token_id) = self.active_token_id.clone() else {
             return;
         };
-        if market.up.token_id != *token_id && market.down.token_id != *token_id {
+        let direction = if market.up.token_id == *token_id {
+            TokenDirection::Up
+        } else if market.down.token_id == *token_id {
+            TokenDirection::Down
+        } else {
             return;
+        };
+        if let Some(order) = self.strategy.create_exit_order(ctx, market, self.position_size) {
+            match self.execute_sell(token_id, direction, &order).await {
+                Ok(resp) => {
+                    let success = resp.result.as_ref().map_or(true, |r| r.success);
+                    if success {
+                        self.clear_position();
+                    } else {
+                        let msg = resp.result.and_then(|r| r.error_msg).unwrap_or_default();
+                        error!("Sell rejected: {}. Staying InPosition.", msg);
+                    }
+                }
+                Err(e) => error!("Sell failed: {}. Staying InPosition.", e),
+            }
         }
-        if let Some(order) = self.strategy.check_exit(ctx, market, self.position_size) {
-            self.execute_sell(token_id, &order).await;
-        }
-    }
+    } */
 
-    async fn try_entry(&mut self, ctx: &TickContext, market: &Option<Market>) {
-        let Some(ref market) = market else { return };
-        if let Some((direction, order)) = self.strategy.check_entry(ctx, market) {
-            let token_id = match direction {
-                TokenDirection::Up => market.up.token_id.clone(),
-                TokenDirection::Down => market.down.token_id.clone(),
-            };
-            self.execute_buy(&token_id, direction, &order).await;
-        }
-    }
+    async fn try_buy(
+        &mut self,
+        ctx: &TickContext,
+        market: &Option<Market>,
+    ) -> Option<ExecuteOrderResponse> {
+        let market = market.as_ref()?;
+        let (direction, order) = self.strategy.create_entry_order(ctx, market)?;
+        let token_id = match direction {
+            TokenDirection::Up => market.up.token_id.clone(),
+            TokenDirection::Down => market.down.token_id.clone(),
+        };
+        match self.execute_buy(&token_id, direction, &order).await {
+            Ok(mut resp) => {
+                if resp.success {
+                    self.state = EngineState::InPosition;
+                } else {
+                    let msg = resp.error_msg.as_deref().unwrap_or_default();
+                    error!("Buy rejected: {}", msg);
+                }
 
-    fn log_status(&mut self, ctx: &TickContext) {
-        let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
-        if ctx.now_ms - self.last_oracle_log >= log_interval_ms {
-            self.last_oracle_log = ctx.now_ms;
-            if self.state != EngineState::Idle {
-                info!(
-                    "{:?} | entry=${:.4} size={:.2}",
-                    self.state, self.entry_price, self.position_size
-                );
+                // For paper trading only
+                if !self.trading_enabled {
+                    match order {
+                        OrderParams::Market { amount, .. } => {
+                            let ask = match direction {
+                                TokenDirection::Up => market.up.best_ask,
+                                TokenDirection::Down => market.down.best_ask,
+                            };
+                            if ask > 0.0 {
+                                resp.price = ask;
+                                resp.size = amount / ask;
+                            }
+                        }
+                        OrderParams::Limit { price, size, .. } => {
+                            resp.price = price;
+                            resp.size = size;
+                        }
+                    }
+                }
+
+                Some(resp)
+            }
+            Err(e) => {
+                error!("Buy failed: {}", e);
+                None
             }
         }
     }
@@ -278,176 +330,157 @@ impl<S: Strategy> StrategyEngine<S> {
         token_id: &str,
         direction: TokenDirection,
         order: &OrderParams,
-    ) {
-        let (entry_price, size) = order.price_and_size();
-
-        let submitted = if self.trading_enabled {
-            self.sign_and_submit(token_id, order, Side::Buy).await
+    ) -> Result<ExecuteOrderResponse, String> {
+        let (order_id, success, error_msg, making, taking) = if self.trading_enabled {
+            match self.sign_and_submit(token_id, order, Side::Buy).await {
+                Ok(resp) => (
+                    resp.order_id,
+                    resp.success,
+                    resp.error_msg,
+                    resp.making_amount,
+                    resp.taking_amount,
+                ),
+                Err(e) => (
+                    String::new(),
+                    false,
+                    Some(e),
+                    Decimal::default(),
+                    Decimal::default(),
+                ),
+            }
         } else {
-            true
+            (
+                "PAPERTRADE-1".to_string(),
+                true,
+                None,
+                Decimal::default(),
+                Decimal::default(),
+            )
         };
 
-        if !submitted {
-            self.entry_failed = true;
-            return;
-        }
+        let (price, size) =
+            if self.trading_enabled && success && matches!(order, OrderParams::Market { .. }) {
+                let making_f64: f64 = making.try_into().unwrap_or(0.0);
+                let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
+                if taking_f64 > 0.0 {
+                    (making_f64 / taking_f64, taking_f64)
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                order.price_and_size()
+            };
 
-        self.enter_position(token_id, direction, entry_price, size);
-
-        if self.trading_enabled {
-            info!("Buy submitted: {}@${:.4}", size, entry_price);
-        } else {
-            info!("Simulated entry at ${:.4}", entry_price);
-        }
-        telegram::send_alert(&format!(
-            "TRADE PLACED! {} @ ${:.4}",
-            self.asset, entry_price
-        ));
+        Ok(ExecuteOrderResponse {
+            side: Side::Buy,
+            direction,
+            price,
+            size,
+            order_params: order.clone(),
+            order_id,
+            success,
+            error_msg,
+        })
     }
 
-    async fn execute_sell(&mut self, token_id: &str, order: &OrderParams) {
-        let (sell_price, size) = order.price_and_size();
-
-        let submitted = if self.trading_enabled {
-            self.sign_and_submit(token_id, order, Side::Sell).await
-        } else {
-            true
-        };
-
-        if !submitted {
-            warn!("Sell failed. Staying InPosition.");
-            return;
-        }
-
-        let pnl = (sell_price - self.entry_price) * size;
-        self.clear_position();
-
-        if self.trading_enabled {
-            info!("Sell submitted: {}@${:.4} PnL=${:.4}", size, sell_price, pnl);
-        } else {
-            info!("Simulated exit at ${:.4} PnL=${:.4}", sell_price, pnl);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Position state helpers
-    // -----------------------------------------------------------------------
-
-    fn enter_position(
+    /* async fn execute_sell(
         &mut self,
         token_id: &str,
         direction: TokenDirection,
-        entry_price: f64,
-        size: f64,
-    ) {
-        self.state = EngineState::InPosition;
-        self.active_token_id = Some(token_id.to_string());
-        self.active_direction = Some(direction);
-        self.entry_price = entry_price;
-        self.position_size = size;
-    }
+        order: &OrderParams,
+    ) -> Result<ExecuteOrderResponse, String> {
+        let result = if self.trading_enabled {
+            let resp = self.sign_and_submit(token_id, order, Side::Sell).await?;
+            Some(ExecuteOrderResult {
+                order_id: resp.order_id,
+                success: resp.success,
+                making_amount: resp.making_amount,
+                taking_amount: resp.taking_amount,
+                error_msg: resp.error_msg,
+            })
+        } else {
+            None
+        };
 
-    fn clear_position(&mut self) {
-        self.state = EngineState::Idle;
-        self.entry_failed = false;
-        self.active_token_id = None;
-        self.active_direction = None;
-        self.entry_price = 0.0;
-        self.position_size = 0.0;
-    }
+        Ok(ExecuteOrderResponse { side: Side::Sell, direction, order_params: order.clone(), result })
+    } */
 
     // -----------------------------------------------------------------------
     // SDK order signing
     // -----------------------------------------------------------------------
 
-    async fn sign_and_submit(&self, token_id: &str, order: &OrderParams, side: Side) -> bool {
+    async fn sign_and_submit(
+        &self,
+        token_id: &str,
+        order: &OrderParams,
+        side: Side,
+    ) -> Result<PostOrderResponse, String> {
         let (Some(ref client), Some(ref signer)) = (&self.client, &self.signer_instance) else {
-            error!("Order failed: client not initialized");
-            return false;
+            return Err("client not initialized".into());
         };
 
         let signable = match order {
-            OrderParams::Limit { price, size } => {
+            OrderParams::Limit {
+                price,
+                size,
+                order_type,
+            } => {
                 let price_dec =
                     Decimal::from_str(&format!("{:.2}", price)).unwrap_or(Decimal::ZERO);
-                let size_dec =
-                    Decimal::from_str(&format!("{:.2}", size)).unwrap_or(Decimal::ZERO);
+                let size_dec = Decimal::from_str(&format!("{:.2}", size)).unwrap_or(Decimal::ZERO);
                 if price_dec <= Decimal::ZERO || size_dec <= Decimal::ZERO {
-                    error!("Order failed: invalid price={} or size={}", price_dec, size_dec);
-                    return false;
+                    return Err(format!("Invalid price={} or size={}", price_dec, size_dec));
                 }
+                let sdk_order_type = match order_type {
+                    traits::MarketOrderType::FAK => OrderType::FAK,
+                    traits::MarketOrderType::FOK => OrderType::FOK,
+                };
                 client
                     .limit_order()
+                    .order_type(sdk_order_type)
                     .token_id(token_id)
+                    .side(side)
                     .price(price_dec)
                     .size(size_dec)
-                    .side(side)
                     .build()
                     .await
             }
-            OrderParams::Market { amount, price, order_type } => {
+            OrderParams::Market { amount, order_type } => {
                 let amount_dec =
                     Decimal::from_str(&format!("{:.2}", amount)).unwrap_or(Decimal::ZERO);
                 if amount_dec <= Decimal::ZERO {
-                    error!("Order failed: invalid amount={}", amount_dec);
-                    return false;
+                    return Err(format!("Invalid amount={}", amount_dec));
                 }
                 let amt = if side == Side::Buy {
                     Amount::usdc(amount_dec)
                 } else {
                     Amount::shares(amount_dec)
-                };
-                let amt = match amt {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!("Order failed: invalid amount: {:?}", e);
-                        return false;
-                    }
-                };
+                }
+                .map_err(|e| format!("Invalid amount: {:?}", e))?;
+
                 let sdk_order_type = match order_type {
                     traits::MarketOrderType::FAK => OrderType::FAK,
                     traits::MarketOrderType::FOK => OrderType::FOK,
                 };
-                let mut builder = client
+                client
                     .market_order()
+                    .order_type(sdk_order_type)
                     .token_id(token_id)
-                    .amount(amt)
                     .side(side)
-                    .order_type(sdk_order_type);
-                if let Some(p) = price {
-                    let price_dec =
-                        Decimal::from_str(&format!("{:.4}", p)).unwrap_or(Decimal::ZERO);
-                    if price_dec > Decimal::ZERO {
-                        builder = builder.price(price_dec);
-                    }
-                }
-                builder.build().await
+                    .amount(amt)
+                    .build()
+                    .await
             }
         };
 
-        let order = match signable {
-            Ok(o) => o,
-            Err(e) => {
-                error!("Order build failed: {:?}", e);
-                return false;
-            }
-        };
-        let signed_order = match client.sign(signer, order).await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Order sign failed: {:?}", e);
-                return false;
-            }
-        };
-        match client.post_order(signed_order).await {
-            Ok(resp) => {
-                info!("Order submitted: id={:?}", resp.order_id);
-                true
-            }
-            Err(e) => {
-                error!("Order post failed: {:?}", e);
-                false
-            }
-        }
+        let order = signable.map_err(|e| format!("Order build failed: {:?}", e))?;
+        let signed_order = client
+            .sign(signer, order)
+            .await
+            .map_err(|e| format!("Order sign failed: {:?}", e))?;
+        client
+            .post_order(signed_order)
+            .await
+            .map_err(|e| format!("Order post failed: {:?}", e))
     }
 }
