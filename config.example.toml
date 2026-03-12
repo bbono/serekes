@@ -21,9 +21,3 @@ interval_minutes = 5
 exchange_price_divergence_threshold = 50.0
 # Minimum seconds between engine log outputs, supports decimals (default: 0.5)
 log_interval_secs = 0.5
-
-[telegram]
-# Telegram bot token for sending notifications from @BotFather (default: "")
-bot_token = ""
-# Telegram chat ID to receive notifications (default: "")
-chat_id = ""

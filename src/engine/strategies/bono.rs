@@ -1,12 +1,11 @@
 use crate::engine::traits::Strategy;
 use crate::types::{MarketOrderType, OrderParams, TickContext, TokenDirection};
 
-#[allow(dead_code)]
-pub struct BonoStrategy {}
+pub struct BonoStrategy;
 
 impl BonoStrategy {
     pub fn new() -> Self {
-        Self {}
+        Self
     }
 }
 
@@ -25,13 +24,11 @@ impl Strategy for BonoStrategy {
             (TokenDirection::Down, down_price)
         };
 
-        
-
         if price > 0.30 {
             Some((
                 direction,
                 OrderParams::Market {
-                    amount: 1.0, // TODO: Hardcoded
+                    amount: 1.0,
                     order_type: MarketOrderType::FOK,
                 },
             ))

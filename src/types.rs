@@ -44,7 +44,6 @@ pub struct Market {
     pub down: TokenSide,
 }
 
-#[allow(dead_code)]
 impl Market {
     pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64, strike_price_binance: f64) -> Self {
         Self {
@@ -55,17 +54,6 @@ impl Market {
             strike_price: 0.0,
             up: TokenSide::new(up_token_id),
             down: TokenSide::new(down_token_id),
-        }
-    }
-
-    /// Get the token side matching a token ID, if any.
-    pub fn side_by_token(&mut self, token_id: &str) -> Option<&mut TokenSide> {
-        if self.up.token_id == token_id {
-            Some(&mut self.up)
-        } else if self.down.token_id == token_id {
-            Some(&mut self.down)
-        } else {
-            None
         }
     }
 }

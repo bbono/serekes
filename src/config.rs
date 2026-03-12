@@ -11,9 +11,6 @@ pub struct AppConfig {
     pub market: MarketConfig,
     #[serde(default)]
     pub engine: EngineConfig,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub telegram: TelegramConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,7 +42,6 @@ impl Default for MarketConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct EngineConfig {
     #[serde(default = "default_killswitch")]
     pub exchange_price_divergence_threshold: f64,
@@ -61,24 +57,6 @@ impl Default for EngineConfig {
             exchange_price_divergence_threshold: default_killswitch(),
             log_interval_secs: default_log_interval(),
             binance_history_max: default_binance_history_max(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct TelegramConfig {
-    #[serde(default)]
-    pub bot_token: String,
-    #[serde(default)]
-    pub chat_id: String,
-}
-
-impl Default for TelegramConfig {
-    fn default() -> Self {
-        Self {
-            bot_token: String::new(),
-            chat_id: String::new(),
         }
     }
 }
