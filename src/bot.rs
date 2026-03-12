@@ -30,10 +30,11 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn push_history(history: &Mutex<VecDeque<(f64, i64)>>, price: f64, ts: i64, max: usize) {
+fn push_history(history: &Mutex<VecDeque<(f64, i64)>>, price: f64, ts: i64, window_ms: i64) {
     let mut hist = history.lock().unwrap_or_else(|e| e.into_inner());
     hist.push_back((price, ts));
-    if hist.len() > max {
+    let cutoff = ts - window_ms;
+    while hist.front().is_some_and(|(_, t)| *t < cutoff) {
         hist.pop_front();
     }
 }
@@ -68,7 +69,7 @@ fn spawn_binance_ws(
     url: String,
     tx: watch::Sender<(f64, i64)>,
     history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    max_entries: usize,
+    window_ms: i64,
 ) {
     tokio::spawn(async move {
         let mut attempts = 0u32;
@@ -77,16 +78,23 @@ fn spawn_binance_ws(
                 Ok((ws_stream, _)) => {
                     attempts = 0;
                     info!("Connected to Binance WS");
-                    let (_, mut read) = ws_stream.split();
-                    while let Some(Ok(Message::Text(text))) = read.next().await {
-                        let price = parse_json(&text)
-                            .and_then(|j| {
-                                let ts = j["T"].as_i64().unwrap_or_else(now_ms);
-                                j["p"].as_str()?.parse::<f64>().ok().map(|p| (p, ts))
-                            });
-                        if let Some((price, ts)) = price {
-                            let _ = tx.send((price, ts));
-                            push_history(&history, price, ts, max_entries);
+                    let (mut write, mut read) = ws_stream.split();
+                    while let Some(Ok(msg)) = read.next().await {
+                        match msg {
+                            Message::Text(text) => {
+                                let price = parse_json(&text)
+                                    .and_then(|j| {
+                                        let ts = j["T"].as_i64().unwrap_or_else(now_ms);
+                                        j["p"].as_str()?.parse::<f64>().ok().map(|p| (p, ts))
+                                    });
+                                if let Some((price, ts)) = price {
+                                    let _ = tx.send((price, ts));
+                                    push_history(&history, price, ts, window_ms);
+                                }
+                            }
+                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Close(_) => break,
+                            _ => {}
                         }
                     }
                 }
@@ -115,12 +123,19 @@ fn spawn_coinbase_ws(product: String, tx: watch::Sender<(f64, i64)>) {
                         "channels": ["ticker"]
                     });
                     let _ = ws_stream.send(Message::Text(sub.to_string())).await;
-                    let (_, mut read) = ws_stream.split();
-                    while let Some(Ok(Message::Text(text))) = read.next().await {
-                        let price = parse_json(&text)
-                            .and_then(|j| j["price"].as_str()?.parse::<f64>().ok());
-                        if let Some(price) = price {
-                            let _ = tx.send((price, now_ms()));
+                    let (mut write, mut read) = ws_stream.split();
+                    while let Some(Ok(msg)) = read.next().await {
+                        match msg {
+                            Message::Text(text) => {
+                                let price = parse_json(&text)
+                                    .and_then(|j| j["price"].as_str()?.parse::<f64>().ok());
+                                if let Some(price) = price {
+                                    let _ = tx.send((price, now_ms()));
+                                }
+                            }
+                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Close(_) => break,
+                            _ => {}
                         }
                     }
                 }
@@ -135,7 +150,12 @@ fn spawn_coinbase_ws(product: String, tx: watch::Sender<(f64, i64)>) {
     });
 }
 
-fn spawn_deribit_dvol_ws(asset: String, tx: watch::Sender<f64>) {
+fn spawn_deribit_dvol_ws(
+    asset: String,
+    tx: watch::Sender<(f64, i64)>,
+    history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+    window_ms: i64,
+) {
     tokio::spawn(async move {
         let mut attempts = 0u32;
         loop {
@@ -152,14 +172,26 @@ fn spawn_deribit_dvol_ws(asset: String, tx: watch::Sender<f64>) {
                         }
                     });
                     let _ = ws_stream.send(Message::Text(sub.to_string())).await;
-                    let (_, mut read) = ws_stream.split();
-                    while let Some(Ok(Message::Text(text))) = read.next().await {
-                        let vol = parse_json(&text).and_then(|j| {
-                            (j["method"] == "subscription")
-                                .then(|| j["params"]["data"]["volatility"].as_f64())?
-                        });
-                        if let Some(val) = vol {
-                            let _ = tx.send(val);
+                    let (mut write, mut read) = ws_stream.split();
+                    while let Some(Ok(msg)) = read.next().await {
+                        match msg {
+                            Message::Text(text) => {
+                                let vol = parse_json(&text).and_then(|j| {
+                                    (j["method"] == "subscription").then(|| {
+                                        let data = &j["params"]["data"];
+                                        let v = data["volatility"].as_f64()?;
+                                        let ts = data["timestamp"].as_i64().unwrap_or_else(now_ms);
+                                        Some((v, ts))
+                                    })?
+                                });
+                                if let Some((val, ts)) = vol {
+                                    let _ = tx.send((val, ts));
+                                    push_history(&history, val, ts, window_ms);
+                                }
+                            }
+                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Close(_) => break,
+                            _ => {}
                         }
                     }
                 }
@@ -178,7 +210,7 @@ fn spawn_chainlink_ws(
     asset: String,
     tx: watch::Sender<(f64, i64)>,
     history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    max_entries: usize,
+    window_ms: i64,
 ) {
     tokio::spawn(async move {
         let mut attempts = 0u32;
@@ -196,16 +228,23 @@ fn spawn_chainlink_ws(
                         }]
                     });
                     let _ = ws_stream.send(Message::Text(sub.to_string())).await;
-                    let (_, mut read) = ws_stream.split();
-                    while let Some(Ok(Message::Text(text))) = read.next().await {
-                        let tick = parse_json(&text).and_then(|j| {
-                            let p = j["payload"]["value"].as_f64()?;
-                            let ts = j["payload"]["timestamp"].as_i64()?;
-                            Some((p, ts))
-                        });
-                        if let Some((price, ts)) = tick {
-                            let _ = tx.send((price, ts));
-                            push_history(&history, price, ts, max_entries);
+                    let (mut write, mut read) = ws_stream.split();
+                    while let Some(Ok(msg)) = read.next().await {
+                        match msg {
+                            Message::Text(text) => {
+                                let tick = parse_json(&text).and_then(|j| {
+                                    let p = j["payload"]["value"].as_f64()?;
+                                    let ts = j["payload"]["timestamp"].as_i64()?;
+                                    Some((p, ts))
+                                });
+                                if let Some((price, ts)) = tick {
+                                    let _ = tx.send((price, ts));
+                                    push_history(&history, price, ts, window_ms);
+                                }
+                            }
+                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Close(_) => break,
+                            _ => {}
                         }
                     }
                 }
@@ -344,9 +383,8 @@ async fn fetch_active_market(
     interval_minutes: u32,
 ) -> Result<Market, Box<dyn std::error::Error + Send + Sync>> {
     let asset_upper = asset.to_uppercase();
-    info!("Fetching active {} market...", asset_upper);
+    info!("-> Fetching active {} market...", asset_upper);
 
-    let binance_symbol = format!("{}USDT", asset_upper);
     let interval_ms = (interval_minutes as i64) * 60_000;
     let kline_interval = if interval_minutes >= 60 {
         format!("{}h", interval_minutes / 60)
@@ -357,10 +395,6 @@ async fn fetch_active_market(
     let bucket_start_ms = (now_ms() / interval_ms) * interval_ms;
 
     let gamma_client = gamma::Client::default();
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_default();
 
     for started_at_ms in [bucket_start_ms, bucket_start_ms + interval_ms] {
         let ts_secs = started_at_ms / 1000;
@@ -395,40 +429,11 @@ async fn fetch_active_market(
             continue;
         }
 
-        let strike_binance =
-            fetch_binance_open_price(&http_client, &binance_symbol, &kline_interval, ts_secs).await;
-
         info!("Found {} {}m market {}", asset_upper, interval_minutes, slug);
-        return Ok(Market::new(slug, up_token, down_token, started_at_ms, expires_at_ms, strike_binance));
+        return Ok(Market::new(slug, up_token, down_token, started_at_ms, expires_at_ms));
     }
 
-    Err(format!("No active {} {}m market found", asset_upper, interval_minutes).into())
-}
-
-async fn fetch_binance_open_price(
-    client: &reqwest::Client,
-    symbol: &str,
-    interval: &str,
-    start_ts: i64,
-) -> f64 {
-    let url = format!(
-        "https://api.binance.com/api/v3/klines?symbol={}&interval={}&startTime={}&limit=1",
-        symbol,
-        interval,
-        start_ts * 1000
-    );
-    if let Ok(resp) = client.get(&url).send().await {
-        if resp.status().is_success() {
-            let json: serde_json::Value = resp.json().await.unwrap_or_default();
-            return json
-                .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|k| k[1].as_str())
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0);
-        }
-    }
-    0.0
+    Err(format!("<- No active {} {}m market found", asset_upper, interval_minutes).into())
 }
 
 fn extract_up_down_tokens(outcomes: &[String], tokens: &[String]) -> (String, String) {
@@ -452,11 +457,11 @@ fn extract_up_down_tokens(outcomes: &[String], tokens: &[String]) -> (String, St
 // Strike price lookup from chainlink history
 // ---------------------------------------------------------------------------
 
-fn lookup_chainlink_strike(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, started_ms: i64) -> f64 {
+fn lookup_strike(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, started_ms: i64, exact: bool) -> f64 {
     let hist = history.lock().unwrap_or_else(|e| e.into_inner());
     hist.iter()
         .rev()
-        .find(|(_, ts)| *ts == started_ms)
+        .find(|(_, ts)| if exact { *ts == started_ms } else { *ts <= started_ms })
         .map(|(price, _)| *price)
         .unwrap_or(0.0)
 }
@@ -471,7 +476,7 @@ async fn wait_for_feeds<S: crate::engine::traits::Strategy>(engine: &StrategyEng
         let b = engine.binance_rx.borrow().0;
         let c = engine.coinbase_rx.borrow().0;
         let cl = engine.chainlink_rx.borrow().0;
-        let d = *engine.dvol_rx.borrow();
+        let d = engine.dvol_rx.borrow().0;
         if b > 0.0 && c > 0.0 && cl > 0.0 && d > 0.0 {
             break;
         }
@@ -498,11 +503,21 @@ async fn main() {
                 .strip_suffix(".rs")
                 .unwrap_or(module)
                 .replace('/', "::");
+            use env_logger::fmt::Color;
+            let level = record.level();
+            let mut level_style = buf.style();
+            match level {
+                log::Level::Error => { level_style.set_color(Color::Red).set_bold(true); }
+                log::Level::Warn  => { level_style.set_color(Color::Yellow).set_bold(true); }
+                log::Level::Info  => { level_style.set_color(Color::Green); }
+                log::Level::Debug => { level_style.set_color(Color::Cyan); }
+                log::Level::Trace => { level_style.set_color(Color::Magenta); }
+            };
             writeln!(
                 buf,
-                "[{} {:5} {}] {}",
+                "[{} {} {}] {}",
                 buf.timestamp(),
-                record.level(),
+                level_style.value(format_args!("{:5}", level)),
                 module,
                 record.args()
             )
@@ -519,7 +534,7 @@ async fn main() {
     let (binance_tx, binance_rx) = watch::channel((0.0f64, 0i64));
     let (coinbase_tx, coinbase_rx) = watch::channel((0.0f64, 0i64));
     let (chainlink_tx, chainlink_rx) = watch::channel((0.0f64, 0i64));
-    let (dvol_tx, dvol_rx) = watch::channel(0.0);
+    let (dvol_tx, dvol_rx) = watch::channel((0.0f64, 0i64));
     let shared_market: Arc<Mutex<Option<Market>>> = Arc::new(Mutex::new(None));
 
     // --- Spawn all price feed WebSockets ---
@@ -527,23 +542,40 @@ async fn main() {
         "wss://stream.binance.com:9443/ws/{}usdt@aggTrade",
         market_asset
     );
+    let market_window_secs = (config.market.interval_minutes * 60) as i64;
+    let binance_history_ms = config.engine.binance_history_secs
+        .map(|s| s as i64 * 1000)
+        .unwrap_or(market_window_secs * 1000);
+    let chainlink_history_ms = config.engine.chainlink_history_secs
+        .map(|s| s as i64 * 1000)
+        .unwrap_or(market_window_secs * 1000);
+    let dvol_history_ms = config.engine.dvol_history_secs
+        .map(|s| s as i64 * 1000)
+        .unwrap_or(market_window_secs * 1000);
+
     let binance_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
     spawn_binance_ws(
         binance_ws_url,
         binance_tx,
         binance_history.clone(),
-        config.engine.binance_history_max,
+        binance_history_ms,
     );
     spawn_coinbase_ws(format!("{}-USD", market_asset.to_uppercase()), coinbase_tx);
-    spawn_deribit_dvol_ws(market_asset.clone(), dvol_tx);
 
-    let chainlink_history_max = ((config.market.interval_minutes as usize) * 60) + 5;
+    let dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
+    spawn_deribit_dvol_ws(
+        market_asset.clone(),
+        dvol_tx,
+        dvol_history.clone(),
+        dvol_history_ms,
+    );
+
     let chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
     spawn_chainlink_ws(
         market_asset.clone(),
         chainlink_tx,
         chainlink_history.clone(),
-        chainlink_history_max,
+        chainlink_history_ms,
     );
 
     // --- Time synchronization ---
@@ -563,6 +595,7 @@ async fn main() {
         shared_market.clone(),
         binance_history.clone(),
         chainlink_history.clone(),
+        dvol_history.clone(),
     );
 
     if let Some(pk) = private_key {
@@ -584,6 +617,7 @@ async fn main() {
             interval_minutes,
             &shared_market,
             &chainlink_history,
+            &binance_history,
         ) => {},
         _ = tokio::signal::ctrl_c() => info!("SIGINT received. Shutting down."),
         _ = sigterm.recv() => info!("SIGTERM received. Shutting down."),
@@ -600,21 +634,26 @@ async fn run_bot_loop<S: crate::engine::traits::Strategy>(
     interval_minutes: u32,
     shared_market: &Arc<Mutex<Option<Market>>>,
     chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
+    binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
 ) {
     wait_for_feeds(engine).await;
 
     loop {
         let mut market = discover_market(asset, interval_minutes).await;
 
-        match resolve_strike_price(chainlink_history, &market).await {
-            Some(strike) => {
-                market.strike_price = strike;
-                info!("Strike price is {:.2} for market {}", strike, market.slug);
+        match resolve_strike_prices(chainlink_history, binance_history, &market).await {
+            Some((chainlink_strike, binance_strike)) => {
+                market.strike_price = chainlink_strike;
+                market.strike_price_binance = binance_strike;
+                info!(
+                    "Strike prices for market {}: chainlink={:.2} binance={:.2}",
+                    market.slug, chainlink_strike, binance_strike
+                );
             }
             None => {
                 let wait_ms =
                     market.expires_at_ms.saturating_sub(now_ms()).max(1000) as u64;
-                warn!("No strike price for market {}. Skipping.", market.slug);
+                warn!("<- No strike price for market {}. Skipping.", market.slug);
                 sleep(Duration::from_millis(wait_ms)).await;
                 continue;
             }
@@ -638,16 +677,24 @@ async fn discover_market(asset: &str, interval_minutes: u32) -> Market {
     }
 }
 
-async fn resolve_strike_price(
-    history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
+async fn resolve_strike_prices(
+    chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
+    binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     market: &Market,
-) -> Option<f64> {
-    info!("Searching strike price for market {}...", market.slug);
+) -> Option<(f64, f64)> {
+    info!("Searching strike prices for market {}...", market.slug);
     let deadline_ms = market.started_at_ms + 10_000;
+    let mut chainlink_strike = 0.0f64;
+    let mut binance_strike = 0.0f64;
     loop {
-        let price = lookup_chainlink_strike(history, market.started_at_ms);
-        if price > 0.0 {
-            return Some(price);
+        if chainlink_strike == 0.0 {
+            chainlink_strike = lookup_strike(chainlink_history, market.started_at_ms, true);
+        }
+        if binance_strike == 0.0 {
+            binance_strike = lookup_strike(binance_history, market.started_at_ms, false);
+        }
+        if chainlink_strike > 0.0 && binance_strike > 0.0 {
+            return Some((chainlink_strike, binance_strike));
         }
         if now_ms() > deadline_ms {
             return None;
@@ -673,7 +720,7 @@ async fn run_market_ticks<S: crate::engine::traits::Strategy>(
     engine: &mut StrategyEngine<S>,
     market: &Market,
 ) {
-    info!("--->>> Entering market {}.", market.slug);
+    info!("--> Entering market {}.", market.slug);
     loop {
         if now_ms() > market.expires_at_ms + 1000 {
             break;
@@ -683,5 +730,5 @@ async fn run_market_ticks<S: crate::engine::traits::Strategy>(
         }
         tokio::task::yield_now().await;
     }
-    info!("<<<--- Exiting market {}.", market.slug);
+    info!("<-- Exiting market {}.", market.slug);
 }

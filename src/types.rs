@@ -44,12 +44,12 @@ pub struct Market {
 }
 
 impl Market {
-    pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64, strike_price_binance: f64) -> Self {
+    pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64) -> Self {
         Self {
             slug,
             started_at_ms,
             expires_at_ms,
-            strike_price_binance,
+            strike_price_binance: 0.0,
             strike_price: 0.0,
             up: TokenSide::new(up_token_id),
             down: TokenSide::new(down_token_id),
@@ -137,6 +137,7 @@ impl OrderParams {
 /// The engine builds this from its WebSocket data feeds, shared market state,
 /// and risk monitors, so the strategy never touches raw watch receivers or
 /// infrastructure. All fields are copied values — no references, no async, pure data.
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct TickContext {
     /// Current BTC (or configured asset) spot price from Binance aggTrade stream.
@@ -156,6 +157,8 @@ pub struct TickContext {
 
     /// Deribit implied volatility index (DVOL).
     pub dvol: f64,
+    /// Unix ms when dvol was last updated.
+    pub dvol_ts: i64,
 
     /// Current unix ms, adjusted for Polymarket server time offset.
     pub now_ms: i64,
@@ -171,6 +174,9 @@ pub struct TickContext {
     /// Recent chainlink price history: (price, timestamp_ms), oldest first.
     /// Lock only when needed — avoid holding across await points.
     pub chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+
+    /// Recent DVOL history: (volatility, timestamp_ms), oldest first.
+    pub dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 }
 
 // ---------------------------------------------------------------------------

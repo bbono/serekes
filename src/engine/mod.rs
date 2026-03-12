@@ -46,17 +46,17 @@ pub struct StrategyEngine<S: Strategy> {
     state: EngineState,
 
     // Loop counters
-    last_killswitch_log_ts: i64,
-    last_engine_state_log_ts: i64,
+    last_log_ts: i64,
 
     // Watch Receivers
     pub binance_rx: watch::Receiver<(f64, i64)>,
     pub coinbase_rx: watch::Receiver<(f64, i64)>,
     pub chainlink_rx: watch::Receiver<(f64, i64)>,
-    pub dvol_rx: watch::Receiver<f64>,
+    pub dvol_rx: watch::Receiver<(f64, i64)>,
     pub shared_market: Arc<Mutex<Option<Market>>>,
     pub binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
     pub chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+    pub dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,10 +72,11 @@ impl<S: Strategy> StrategyEngine<S> {
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
         chainlink_rx: watch::Receiver<(f64, i64)>,
-        dvol_rx: watch::Receiver<f64>,
+        dvol_rx: watch::Receiver<(f64, i64)>,
         shared_market: Arc<Mutex<Option<Market>>>,
         binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
         chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+        dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
     ) -> Self {
         Self {
             strategy,
@@ -85,8 +86,7 @@ impl<S: Strategy> StrategyEngine<S> {
             client: None,
             signer_instance: None,
             state: EngineState::Idle,
-            last_killswitch_log_ts: 0,
-            last_engine_state_log_ts: 0,
+            last_log_ts: 0,
             binance_rx,
             coinbase_rx,
             chainlink_rx,
@@ -94,6 +94,7 @@ impl<S: Strategy> StrategyEngine<S> {
             shared_market,
             binance_history,
             chainlink_history,
+            dvol_history,
         }
     }
 
@@ -143,8 +144,8 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
-        if ctx.now_ms - self.last_engine_state_log_ts >= log_interval_ms {
-            self.last_engine_state_log_ts = ctx.now_ms;
+        if ctx.now_ms - self.last_log_ts >= log_interval_ms {
+            self.last_log_ts = ctx.now_ms;
             info!("[{:?}]", self.state);
         }
 
@@ -159,7 +160,7 @@ impl<S: Strategy> StrategyEngine<S> {
         let (binance_price, binance_ts) = *self.binance_rx.borrow();
         let (coinbase_price, coinbase_ts) = *self.coinbase_rx.borrow();
         let (chainlink_price, chainlink_ts) = *self.chainlink_rx.borrow();
-        let dvol = *self.dvol_rx.borrow();
+        let (dvol, dvol_ts) = *self.dvol_rx.borrow();
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -179,10 +180,12 @@ impl<S: Strategy> StrategyEngine<S> {
             chainlink_price,
             chainlink_ts,
             dvol,
+            dvol_ts,
             now_ms,
             market,
             binance_history: self.binance_history.clone(),
             chainlink_history: self.chainlink_history.clone(),
+            dvol_history: self.dvol_history.clone(),
         }
     }
 
@@ -193,8 +196,8 @@ impl<S: Strategy> StrategyEngine<S> {
             && ctx.binance_price > 0.0
         {
             let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
-            if ctx.now_ms - self.last_killswitch_log_ts >= log_interval_ms {
-                self.last_killswitch_log_ts = ctx.now_ms;
+            if ctx.now_ms - self.last_log_ts >= log_interval_ms {
+                self.last_log_ts = ctx.now_ms;
                 warn!(
                     "Killswitch! Binance=${:.2} Coinbase=${:.2} divergence=${:.2}",
                     ctx.binance_price, ctx.coinbase_price, divergence

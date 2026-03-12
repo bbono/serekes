@@ -28,7 +28,7 @@ impl Strategy for BonoStrategy {
             Some((
                 direction,
                 OrderParams::Market {
-                    amount: 1.0,
+                    amount: 0.5,
                     order_type: MarketOrderType::FOK,
                 },
             ))

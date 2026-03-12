@@ -47,8 +47,9 @@ pub struct EngineConfig {
     pub exchange_price_divergence_threshold: f64,
     #[serde(default = "default_log_interval")]
     pub log_interval_secs: f64,
-    #[serde(default = "default_binance_history_max")]
-    pub binance_history_max: usize,
+    pub binance_history_secs: Option<u32>,
+    pub chainlink_history_secs: Option<u32>,
+    pub dvol_history_secs: Option<u32>,
 }
 
 impl Default for EngineConfig {
@@ -56,7 +57,9 @@ impl Default for EngineConfig {
         Self {
             exchange_price_divergence_threshold: default_killswitch(),
             log_interval_secs: default_log_interval(),
-            binance_history_max: default_binance_history_max(),
+            binance_history_secs: None,
+            chainlink_history_secs: None,
+            dvol_history_secs: None,
         }
     }
 }
@@ -67,7 +70,6 @@ fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
 fn default_killswitch() -> f64 { 50.0 }
 fn default_log_interval() -> f64 { 0.5 }
-fn default_binance_history_max() -> usize { 10_000 }
 
 impl AppConfig {
     pub fn load(path: &str) -> Self {

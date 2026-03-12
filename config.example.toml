@@ -20,4 +20,9 @@ interval_minutes = 5
 # If exceeded, all trading activity is halted (default: 50.0)
 exchange_price_divergence_threshold = 50.0
 # Minimum seconds between engine log outputs, supports decimals (default: 0.5)
-log_interval_secs = 0.5
+log_interval_secs = 1
+# Price history retention in seconds. Evicts entries older than the window.
+# All default to market window (interval_minutes * 60) when not set.
+# binance_history_secs = 300
+# chainlink_history_secs = 300
+# dvol_history_secs = 300
