@@ -624,80 +624,110 @@ async fn main() {
     let interval_minutes = config.market.interval_minutes;
 
     tokio::select! {
-        _ = async {
-            wait_for_feeds(&engine).await;
+        _ = run_bot_loop(
+            &mut engine,
+            &market_asset,
+            interval_minutes,
+            &shared_market,
+            &chainlink_history,
+        ) => {},
+        _ = tokio::signal::ctrl_c() => info!("SIGINT received. Shutting down."),
+        _ = sigterm.recv() => info!("SIGTERM received. Shutting down."),
+    }
+}
 
-            // === MARKET ROTATION LOOP ===
-            loop {
-                // 1. Discover market
-                let mut market = loop {
-                    match fetch_active_market(&market_asset, interval_minutes).await {
-                        Ok(result) => break result,
-                        Err(e) => {
-                            warn!("Market discovery error: {}. Retrying...", e);
-                            sleep(Duration::from_secs(5)).await;
-                        }
-                    }
-                };
+// ---------------------------------------------------------------------------
+// Bot loop
+// ---------------------------------------------------------------------------
 
-                // 2. Wait up to 10s for chainlink strike price, then skip market
-                info!("Searching strike price for market {}...", market.slug);
-                let deadline_ms = market.started_at_ms + 10_000;
-                let strike_chainlink = loop {
-                    let price = lookup_chainlink_strike(&chainlink_history, market.started_at_ms);
-                    if price > 0.0 {
-                        break price;
-                    }
-                    if now_secs() * 1000 > deadline_ms {
-                        break 0.0;
-                    }
-                    sleep(Duration::from_millis(100)).await;
-                };
-                if strike_chainlink == 0.0 {
-                    let wait_secs = (market.expires_at_ms / 1000).saturating_sub(now_secs()).max(1) as u64;
-                    warn!("No strike price for market {}. Skipping market.", market.slug);
-                    sleep(Duration::from_secs(wait_secs)).await;
-                    continue;
-                } else {
-                    market.strike_price = strike_chainlink;
-                    info!("Strike price is {:.2} for market {}", strike_chainlink, market.slug);
-                }
+async fn run_bot_loop<S: crate::engine::traits::Strategy>(
+    engine: &mut StrategyEngine<S>,
+    asset: &str,
+    interval_minutes: u32,
+    shared_market: &Arc<Mutex<Option<Market>>>,
+    chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
+) {
+    wait_for_feeds(engine).await;
 
-                // 3. Spawn Polymarket price WS for this market
-                let up_token = market.up.token_id.clone();
-                let down_token = market.down.token_id.clone();
-                info!("Connecting to Polymarket Price WS for market {}...", market.slug);
-                *shared_market.lock().unwrap_or_else(|e| e.into_inner()) = Some(market.clone());
-                let poly_connected = Arc::new(tokio::sync::Notify::new());
-                let price_handle = spawn_poly_price_ws(
-                    shared_market.clone(),
-                    vec![up_token, down_token],
-                    poly_connected.clone(),
-                );
-                poly_connected.notified().await;
+    loop {
+        let mut market = discover_market(asset, interval_minutes).await;
 
-                // 4. Tick loop until market expires
-                info!("--->>> Entering market {}.", market.slug);
-                loop {
-                    if now_secs() * 1000 > market.expires_at_ms + 1000 {
-                        break;
-                    }
-                    if let Some(trade) = engine.execute_tick().await {
-                        info!("Trade: {:?}", trade);
-                    }
-                    tokio::task::yield_now().await;
-                }
-                info!("<<<--- Exiting market {}.", market.slug);
-
-                // 6. Cleanup
-                price_handle.abort();
+        match resolve_strike_price(chainlink_history, &market).await {
+            Some(strike) => {
+                market.strike_price = strike;
+                info!("Strike price is {:.2} for market {}", strike, market.slug);
             }
-        } => {},
-        _ = tokio::signal::ctrl_c() => {
-            info!("SIGINT received. Shutting down.");
-        },
-        _ = sigterm.recv() => {
-            info!("SIGTERM received. Shutting down.");
+            None => {
+                let wait_secs =
+                    (market.expires_at_ms / 1000).saturating_sub(now_secs()).max(1) as u64;
+                warn!("No strike price for market {}. Skipping.", market.slug);
+                sleep(Duration::from_secs(wait_secs)).await;
+                continue;
+            }
+        }
+
+        let price_handle = connect_poly_price_ws(shared_market, &market).await;
+        run_market_ticks(engine, &market).await;
+        price_handle.abort();
+    }
+}
+
+async fn discover_market(asset: &str, interval_minutes: u32) -> Market {
+    loop {
+        match fetch_active_market(asset, interval_minutes).await {
+            Ok(market) => return market,
+            Err(e) => {
+                warn!("Market discovery error: {}. Retrying...", e);
+                sleep(Duration::from_secs(5)).await;
+            }
         }
     }
+}
+
+async fn resolve_strike_price(
+    history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
+    market: &Market,
+) -> Option<f64> {
+    info!("Searching strike price for market {}...", market.slug);
+    let deadline_ms = market.started_at_ms + 10_000;
+    loop {
+        let price = lookup_chainlink_strike(history, market.started_at_ms);
+        if price > 0.0 {
+            return Some(price);
+        }
+        if now_secs() * 1000 > deadline_ms {
+            return None;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn connect_poly_price_ws(
+    shared_market: &Arc<Mutex<Option<Market>>>,
+    market: &Market,
+) -> tokio::task::JoinHandle<()> {
+    let token_ids = vec![market.up.token_id.clone(), market.down.token_id.clone()];
+    info!("Connecting to Polymarket Price WS for market {}...", market.slug);
+    *shared_market.lock().unwrap_or_else(|e| e.into_inner()) = Some(market.clone());
+    let connected = Arc::new(tokio::sync::Notify::new());
+    let handle = spawn_poly_price_ws(shared_market.clone(), token_ids, connected.clone());
+    connected.notified().await;
+    handle
+}
+
+async fn run_market_ticks<S: crate::engine::traits::Strategy>(
+    engine: &mut StrategyEngine<S>,
+    market: &Market,
+) {
+    info!("--->>> Entering market {}.", market.slug);
+    loop {
+        if now_secs() * 1000 > market.expires_at_ms + 1000 {
+            break;
+        }
+        if let Some(trade) = engine.execute_tick().await {
+            info!("Trade: {:?}", trade);
+        }
+        tokio::task::yield_now().await;
+    }
+    info!("<<<--- Exiting market {}.", market.slug);
 }
