@@ -35,7 +35,7 @@ pub enum EngineState {
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,
     pub paper_mode: bool,
-    pub time_offset: i64,
+    pub time_offset_ms: i64,
     pub engine_config: EngineConfig,
 
     // Auth / SDK
@@ -67,7 +67,7 @@ impl<S: Strategy> StrategyEngine<S> {
     pub fn new(
         strategy: S,
         paper_mode: bool,
-        time_offset: i64,
+        time_offset_ms: i64,
         engine_config: EngineConfig,
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
@@ -80,7 +80,7 @@ impl<S: Strategy> StrategyEngine<S> {
         Self {
             strategy,
             paper_mode,
-            time_offset,
+            time_offset_ms,
             engine_config,
             client: None,
             signer_instance: None,
@@ -164,7 +164,7 @@ impl<S: Strategy> StrategyEngine<S> {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64
-            + (self.time_offset * 1000);
+            + self.time_offset_ms;
         let market = self
             .shared_market
             .lock()

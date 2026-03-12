@@ -311,23 +311,22 @@ fn spawn_poly_price_ws(
 // Time sync
 // ---------------------------------------------------------------------------
 
-async fn sync_time_offset() -> i64 {
+async fn sync_time_offset_ms() -> i64 {
     let clob = ClobClient::new("https://clob.polymarket.com", ClobConfig::default()).unwrap();
     match clob.server_time().await {
         Ok(server_ts) => {
-            let local_ts = now_ms() / 1000;
-            let offset = server_ts - local_ts;
+            let offset_ms = (server_ts * 1000) - now_ms();
             info!(
-                "Time sync: server={} local={} offset={}s",
-                server_ts, local_ts, offset
+                "Time sync: server={}s local={}ms offset={}ms",
+                server_ts, now_ms(), offset_ms
             );
-            if offset.abs() > 300 {
+            if offset_ms.abs() > 300_000 {
                 warn!(
-                    "Large time skew detected! Adjusting timestamps by {}s",
-                    offset
+                    "Large time skew detected! Adjusting timestamps by {}ms",
+                    offset_ms
                 );
             }
-            offset
+            offset_ms
         }
         Err(e) => {
             error!("Failed to sync time: {}. Defaulting to 0 offset.", e);
@@ -348,15 +347,14 @@ async fn fetch_active_market(
     info!("Fetching active {} market...", asset_upper);
 
     let binance_symbol = format!("{}USDT", asset_upper);
-    let interval_secs = (interval_minutes as i64) * 60;
+    let interval_ms = (interval_minutes as i64) * 60_000;
     let kline_interval = if interval_minutes >= 60 {
         format!("{}h", interval_minutes / 60)
     } else {
         format!("{}m", interval_minutes)
     };
 
-    let now_ts = now_ms() / 1000;
-    let bucket_start = (now_ts / interval_secs) * interval_secs;
+    let bucket_start_ms = (now_ms() / interval_ms) * interval_ms;
 
     let gamma_client = gamma::Client::default();
     let http_client = reqwest::Client::builder()
@@ -364,8 +362,9 @@ async fn fetch_active_market(
         .build()
         .unwrap_or_default();
 
-    for ts in [bucket_start, bucket_start + interval_secs] {
-        let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts);
+    for started_at_ms in [bucket_start_ms, bucket_start_ms + interval_ms] {
+        let ts_secs = started_at_ms / 1000;
+        let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts_secs);
         info!("Discovering active {} {}m market...", asset_upper, interval_minutes);
 
         let request = gamma::types::request::EventBySlugRequest::builder()
@@ -390,7 +389,6 @@ async fn fetch_active_market(
         let outcomes: Vec<String> = serde_json::from_str(outcomes_str)?;
         let (up_token, down_token) = extract_up_down_tokens(&outcomes, &tokens);
 
-        let started_at_ms = ts * 1000;
         let expires_at_ms = market.end_date.map(|d| d.timestamp_millis()).unwrap_or(0);
 
         if up_token.is_empty() || down_token.is_empty() || expires_at_ms <= now_ms() {
@@ -398,7 +396,7 @@ async fn fetch_active_market(
         }
 
         let strike_binance =
-            fetch_binance_open_price(&http_client, &binance_symbol, &kline_interval, ts).await;
+            fetch_binance_open_price(&http_client, &binance_symbol, &kline_interval, ts_secs).await;
 
         info!("Found {} {}m market {}", asset_upper, interval_minutes, slug);
         return Ok(Market::new(slug, up_token, down_token, started_at_ms, expires_at_ms, strike_binance));
@@ -549,14 +547,14 @@ async fn main() {
     );
 
     // --- Time synchronization ---
-    let time_offset = sync_time_offset().await;
+    let time_offset_ms = sync_time_offset_ms().await;
 
     // --- Strategy engine ---
     let strategy = BonoStrategy::new();
     let mut engine = StrategyEngine::new(
         strategy,
         paper_mode,
-        time_offset,
+        time_offset_ms,
         config.engine.clone(),
         binance_rx,
         coinbase_rx,
@@ -614,10 +612,10 @@ async fn run_bot_loop<S: crate::engine::traits::Strategy>(
                 info!("Strike price is {:.2} for market {}", strike, market.slug);
             }
             None => {
-                let wait_secs =
-                    (market.expires_at_ms / 1000).saturating_sub(now_ms() / 1000).max(1) as u64;
+                let wait_ms =
+                    market.expires_at_ms.saturating_sub(now_ms()).max(1000) as u64;
                 warn!("No strike price for market {}. Skipping.", market.slug);
-                sleep(Duration::from_secs(wait_secs)).await;
+                sleep(Duration::from_millis(wait_ms)).await;
                 continue;
             }
         }
