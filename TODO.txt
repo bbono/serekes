@@ -1,3 +1,4 @@
+1. Protect from such pices
 [2026-03-12T15:00:31Z INFO  bot] Created order: ExecuteOrderResponse { side: Buy, direction: Down, price: 1.0, size: 1.0, order_params: Market { amount: 1.0, order_type: FOK }, order_id: "", success: false, error_msg: Some("Order post failed: Error { kind: Status, source: Some(Status { status_code: 400, method: POST, path: \"/order\", message: \"{\\\"error\\\":\\\"order couldn't be fully filled. FOK orders are fully filled or killed.\\\"}\\n\" }), backtrace: <disabled> }") }
-
-2. MArket & MarketInfo
+2. Market Order - price
+3. Heartbeat order?
