@@ -93,7 +93,7 @@ graph LR
 - Killswitch: halts entries when Binance/Coinbase prices diverge beyond threshold
 - Order signing and submission via Polymarket SDK (tick size + neg_risk auto-handled by SDK)
 - Minimum order size validation before submission
-- Order response status handling (Matched/Delayed/Unmatched/Live)
+- Order response status handling (Matched/Delayed/Unmatched/Live) — stored in `Trade.order_status`
 - Limit and Market order support
 - Position tracking (token ID, direction, entry price, size)
 - Periodic status logging

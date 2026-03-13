@@ -216,7 +216,7 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         // --- Submit or simulate ---
-        let (order_id, success, error_msg, making, taking): (String, bool, Option<String>, Decimal, Decimal) = if !self.paper_mode {
+        let (order_id, order_status, success, error_msg, making, taking): (String, OrderStatusType, bool, Option<String>, Decimal, Decimal) = if !self.paper_mode {
             match self.sign_and_submit(&token_id, &intent).await {
                 Ok(resp) => {
                     match &resp.status {
@@ -238,6 +238,7 @@ impl<S: Strategy> StrategyEngine<S> {
                     }
                     (
                         resp.order_id,
+                        resp.status,
                         resp.success,
                         resp.error_msg,
                         resp.making_amount,
@@ -252,6 +253,7 @@ impl<S: Strategy> StrategyEngine<S> {
         } else {
             (
                 "PAPERTRADE-1".to_string(),
+                OrderStatusType::Matched,
                 true,
                 None,
                 Decimal::default(),
@@ -306,6 +308,7 @@ impl<S: Strategy> StrategyEngine<S> {
             price,
             size,
             order_id,
+            order_status,
             success,
             error_msg,
         })
