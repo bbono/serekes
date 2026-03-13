@@ -1,7 +1,6 @@
 mod types;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
-use polymarket_client_sdk::clob::types::Side;
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma;
@@ -294,11 +293,6 @@ fn spawn_poly_price_ws(
                         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(m) = guard.as_mut() {
                             for entry in &price_change.price_changes {
-                                let price_f64: f64 = entry.price.to_string().parse().unwrap_or(0.0);
-                                if price_f64 <= 0.0 {
-                                    continue;
-                                }
-
                                 let asset_str = entry.asset_id.to_string();
                                 let is_up = asset_str == m.up.token_id;
                                 let is_down = asset_str == m.down.token_id;
@@ -306,15 +300,18 @@ fn spawn_poly_price_ws(
                                     continue;
                                 }
 
-                                if is_up {
-                                    match entry.side {
-                                        Side::Buy => m.up.best_bid = price_f64,
-                                        _ => m.up.best_ask = price_f64,
+                                let side = if is_up { &mut m.up } else { &mut m.down };
+
+                                if let Some(bid) = &entry.best_bid {
+                                    let v: f64 = bid.to_string().parse().unwrap_or(0.0);
+                                    if v > 0.0 {
+                                        side.best_bid = v;
                                     }
-                                } else {
-                                    match entry.side {
-                                        Side::Buy => m.down.best_bid = price_f64,
-                                        _ => m.down.best_ask = price_f64,
+                                }
+                                if let Some(ask) = &entry.best_ask {
+                                    let v: f64 = ask.to_string().parse().unwrap_or(0.0);
+                                    if v > 0.0 {
+                                        side.best_ask = v;
                                     }
                                 }
                             }
