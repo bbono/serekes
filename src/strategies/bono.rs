@@ -11,7 +11,7 @@ impl BonoStrategy {
 }
 
 impl Strategy for BonoStrategy {
-    fn create_entry_order(
+    fn create_order(
         &self,
         ctx: &TickContext,
     ) -> Option<(TokenDirection, OrderIntent)> {

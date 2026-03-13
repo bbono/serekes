@@ -119,9 +119,9 @@ impl<S: Strategy> StrategyEngine<S> {
             return None;
         }
 
-        // 2. Try buy
+        // 2. Try to place an order
         let trade = if self.state == EngineState::Idle {
-            self.try_buy(&ctx).await
+            self.try_order(&ctx).await
         } else {
             None
         };
@@ -191,12 +191,12 @@ impl<S: Strategy> StrategyEngine<S> {
         false
     }
 
-    async fn try_buy(
+    async fn try_order(
         &mut self,
         ctx: &TickContext,
     ) -> Option<Trade> {
         let market = ctx.market.as_ref()?;
-        let (direction, intent) = self.strategy.create_entry_order(ctx)?;
+        let (direction, intent) = self.strategy.create_order(ctx)?;
 
         // --- Validate minimum order size ---
         if market.min_order_size > 0.0 {
