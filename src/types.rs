@@ -39,6 +39,7 @@ pub struct TokenSide {
     pub token_id: String,
     pub best_bid: f64,
     pub best_ask: f64,
+    pub last_updated: i64,
 }
 
 impl TokenSide {
@@ -47,6 +48,7 @@ impl TokenSide {
             token_id,
             best_bid: 0.0,
             best_ask: 0.0,
+            last_updated: 0,
         }
     }
 }

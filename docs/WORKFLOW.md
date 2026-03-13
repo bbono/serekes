@@ -50,8 +50,7 @@ flowchart TD
     Set strike_price = chainlink value"]
 
     S4["④ SPAWN POLYMARKET PRICE WS
-    Subscribe to bid/ask for both Up/Down tokens
-    Validates up_mid + down_mid ≈ 1.0"]
+    Subscribe to bid/ask for both Up/Down tokens"]
 
     S5["⑤ TICK LOOP
     execute_tick() each iteration
@@ -227,12 +226,11 @@ On startup (and after each market expires):
 
 Backoff formula: `min(5 * 2^attempt, 60)` seconds.
 
-## Polymarket Price Validation
+## Polymarket Price Updates
 
-The price WS validates incoming bid/ask updates:
-- Both bid and ask must be > 0
+The price WS updates incoming bid/ask directly:
+- Price must be > 0
 - Token must belong to current market (up or down)
-- `up_mid + down_mid` must be between 0.9 and 1.1 (skip validation if either side uninitialized)
 
 ## Config Structure
 

@@ -1,7 +1,6 @@
 mod types;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
-use polymarket_client_sdk::clob::types::Side;
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma;
@@ -293,12 +292,8 @@ fn spawn_poly_price_ws(
                     Ok(price_change) => {
                         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(m) = guard.as_mut() {
+                            let ts_ms = price_change.timestamp * 1000;
                             for entry in &price_change.price_changes {
-                                let price_f64: f64 = entry.price.to_string().parse().unwrap_or(0.0);
-                                if price_f64 <= 0.0 {
-                                    continue;
-                                }
-
                                 let asset_str = entry.asset_id.to_string();
                                 let is_up = asset_str == m.up.token_id;
                                 let is_down = asset_str == m.down.token_id;
@@ -306,56 +301,21 @@ fn spawn_poly_price_ws(
                                     continue;
                                 }
 
-                                // Determine which field to update based on side
-                                let (new_bid, new_ask) = if is_up {
-                                    match entry.side {
-                                        Side::Buy => (price_f64, m.up.best_ask),
-                                        _ => (m.up.best_bid, price_f64),
-                                    }
-                                } else {
-                                    match entry.side {
-                                        Side::Buy => (price_f64, m.down.best_ask),
-                                        _ => (m.down.best_bid, price_f64),
-                                    }
-                                };
+                                let side = if is_up { &mut m.up } else { &mut m.down };
 
-                                if new_bid <= 0.0 || new_ask <= 0.0 {
-                                    // Only one side known so far, update anyway
-                                    if is_up {
-                                        match entry.side {
-                                            Side::Buy => m.up.best_bid = price_f64,
-                                            _ => m.up.best_ask = price_f64,
-                                        }
-                                    } else {
-                                        match entry.side {
-                                            Side::Buy => m.down.best_bid = price_f64,
-                                            _ => m.down.best_ask = price_f64,
-                                        }
+                                if let Some(bid) = &entry.best_bid {
+                                    let v: f64 = bid.to_string().parse().unwrap_or(0.0);
+                                    if v > 0.0 {
+                                        side.best_bid = v;
                                     }
-                                    continue;
                                 }
-
-                                // Validate: up mid + down mid should be ~1.0
-                                let (new_up_mid, new_down_mid) = if is_up {
-                                    ((new_bid + new_ask) / 2.0, (m.down.best_bid + m.down.best_ask) / 2.0)
-                                } else {
-                                    ((m.up.best_bid + m.up.best_ask) / 2.0, (new_bid + new_ask) / 2.0)
-                                };
-                                let sum = new_up_mid + new_down_mid;
-                                if new_down_mid > 0.0
-                                    && new_up_mid > 0.0
-                                    && (sum < 0.9 || sum > 1.1)
-                                {
-                                    continue;
+                                if let Some(ask) = &entry.best_ask {
+                                    let v: f64 = ask.to_string().parse().unwrap_or(0.0);
+                                    if v > 0.0 {
+                                        side.best_ask = v;
+                                    }
                                 }
-
-                                if is_up {
-                                    m.up.best_bid = new_bid;
-                                    m.up.best_ask = new_ask;
-                                } else {
-                                    m.down.best_bid = new_bid;
-                                    m.down.best_ask = new_ask;
-                                }
+                                side.last_updated = ts_ms;
                             }
                         }
                     }
