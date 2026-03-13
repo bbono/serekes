@@ -5,6 +5,24 @@ use polymarket_client_sdk::clob::types::{OrderType, Side};
 use polymarket_client_sdk::types::Decimal;
 
 // ---------------------------------------------------------------------------
+// Engine types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EngineState {
+    Idle,
+    InPosition,
+}
+
+pub trait Strategy {
+    /// Called each tick when idle. Return Some((direction, intent)) to enter.
+    fn create_entry_order(
+        &self,
+        ctx: &TickContext,
+    ) -> Option<(TokenDirection, OrderIntent)>;
+}
+
+// ---------------------------------------------------------------------------
 // Market types
 // ---------------------------------------------------------------------------
 

@@ -14,9 +14,11 @@ use url::Url;
 
 mod config;
 mod engine;
+mod strategies;
 
 use crate::config::AppConfig;
-use crate::engine::{BonoStrategy, StrategyEngine};
+use crate::engine::StrategyEngine;
+use crate::strategies::BonoStrategy;
 use tokio::sync::watch;
 
 fn backoff_secs(attempt: u32) -> u64 {
@@ -470,7 +472,7 @@ fn lookup_strike(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, started_ms: i64, ex
 // Wait for all feeds to have data
 // ---------------------------------------------------------------------------
 
-async fn wait_for_feeds<S: crate::engine::traits::Strategy>(engine: &StrategyEngine<S>) {
+async fn wait_for_feeds<S: crate::types::Strategy>(engine: &StrategyEngine<S>) {
     info!("Waiting for price feeds...");
     loop {
         let b = engine.binance_rx.borrow().0;
@@ -628,7 +630,7 @@ async fn main() {
 // Bot loop
 // ---------------------------------------------------------------------------
 
-async fn run_bot_loop<S: crate::engine::traits::Strategy>(
+async fn run_bot_loop<S: crate::types::Strategy>(
     engine: &mut StrategyEngine<S>,
     asset: &str,
     interval_minutes: u32,
@@ -716,7 +718,7 @@ async fn connect_poly_price_ws(
     handle
 }
 
-async fn run_market_ticks<S: crate::engine::traits::Strategy>(
+async fn run_market_ticks<S: crate::types::Strategy>(
     engine: &mut StrategyEngine<S>,
     market: &Market,
 ) {

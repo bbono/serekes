@@ -1,11 +1,5 @@
-pub mod strategies;
-pub mod traits;
-
-pub use strategies::BonoStrategy;
-pub use traits::Strategy;
-
 use crate::config::EngineConfig;
-use crate::types::{Market, OrderIntent, TickContext, TokenDirection, Trade};
+use crate::types::{EngineState, Market, OrderIntent, Strategy, TickContext, TokenDirection, Trade};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
@@ -20,17 +14,6 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
-
-
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EngineState {
-    Idle,
-    InPosition,
-}
 
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,

@@ -65,12 +65,9 @@ graph TD
 graph LR
     SRC["src/"] --> BOT["bot.rs<br/>Entry point: main(), WS spawners, market discovery"]
     SRC --> CFG["config.rs<br/>AppConfig deserialization from TOML"]
-    SRC --> TYP["types.rs<br/>Market, TokenSide, TokenDirection types"]
-    SRC --> TG["telegram.rs<br/>Fire-and-forget Telegram alert sender"]
-    SRC --> ENG["engine/"]
-    ENG --> MOD["mod.rs<br/>StrategyEngine: state machine, tick loop, order execution"]
-    ENG --> TRAITS["traits.rs<br/>Strategy trait, TickContext, OrderParams"]
-    ENG --> STRAT["strategies/"]
+    SRC --> TYP["types.rs<br/>Domain types + Strategy trait + EngineState"]
+    SRC --> ENG["engine.rs<br/>StrategyEngine: state machine, tick loop, order execution"]
+    SRC --> STRAT["strategies/"]
     STRAT --> SMOD["mod.rs<br/>Strategy re-exports"]
     STRAT --> BONO["bono.rs<br/>BonoStrategy implementation"]
 ```
@@ -88,7 +85,7 @@ graph LR
 - Time synchronization with Polymarket server
 - Graceful shutdown (SIGINT/SIGTERM)
 
-### Engine Layer (`engine/mod.rs`, `engine/traits.rs`)
+### Engine Layer (`engine.rs`, types in `types.rs`)
 
 - Tick-based execution loop
 - State machine (Idle ↔ InPosition)
@@ -100,7 +97,7 @@ graph LR
 - Periodic status logging
 - Telegram trade alerts
 
-### Business Logic Layer (`engine/strategies/`)
+### Business Logic Layer (`strategies/`)
 
 - Pure trading logic — no I/O, no async, no infrastructure
 - Receives `TickContext` (read-only market snapshot) and `Market` (Polymarket state)
@@ -111,7 +108,7 @@ graph LR
 
 - **Config** (`config.rs`): TOML deserialization with defaults and validation
 - **Telegram** (`telegram.rs`): Non-blocking alert sender via `OnceLock` + `tokio::spawn`
-- **Types** (`types.rs`): Shared domain types (`Market`, `TokenSide`, `TokenDirection`)
+- **Types** (`types.rs`): Shared domain types (`Market`, `TokenSide`, `TokenDirection`, `Strategy` trait, `EngineState`)
 
 ## Concurrency Model
 
