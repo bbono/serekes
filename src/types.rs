@@ -197,6 +197,4 @@ pub struct Trade {
     pub size: f64,
     pub order_id: String,
     pub order_status: OrderStatusType,
-    pub success: bool,
-    pub error_msg: Option<String>,
 }

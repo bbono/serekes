@@ -216,7 +216,7 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         // --- Submit or simulate ---
-        let (order_id, order_status, success, error_msg, making, taking): (String, OrderStatusType, bool, Option<String>, Decimal, Decimal) = if !self.paper_mode {
+        let (order_id, order_status, making, taking): (String, OrderStatusType, Decimal, Decimal) = if !self.paper_mode {
             match self.sign_and_submit(&token_id, &intent).await {
                 Ok(resp) => {
                     match &resp.status {
@@ -239,8 +239,6 @@ impl<S: Strategy> StrategyEngine<S> {
                     (
                         resp.order_id,
                         resp.status,
-                        resp.success,
-                        resp.error_msg,
                         resp.making_amount,
                         resp.taking_amount,
                     )
@@ -254,8 +252,6 @@ impl<S: Strategy> StrategyEngine<S> {
             (
                 "PAPERTRADE-1".to_string(),
                 OrderStatusType::Matched,
-                true,
-                None,
                 Decimal::default(),
                 Decimal::default(),
             )
@@ -282,7 +278,7 @@ impl<S: Strategy> StrategyEngine<S> {
                     (p, s)
                 }
             }
-        } else if success && matches!(intent, OrderIntent::Market { .. }) {
+        } else if order_status == OrderStatusType::Matched && matches!(intent, OrderIntent::Market { .. }) {
             let making_f64: f64 = making.try_into().unwrap_or(0.0);
             let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
             if taking_f64 > 0.0 {
@@ -295,11 +291,8 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         // --- Update state ---
-        if success {
+        if order_status == OrderStatusType::Matched {
             self.state = EngineState::InPosition;
-        } else {
-            let msg: &str = error_msg.as_deref().unwrap_or_default();
-            error!("Order rejected: {}", msg);
         }
 
         Some(Trade {
@@ -309,8 +302,6 @@ impl<S: Strategy> StrategyEngine<S> {
             size,
             order_id,
             order_status,
-            success,
-            error_msg,
         })
     }
 
