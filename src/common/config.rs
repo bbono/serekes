@@ -45,6 +45,10 @@ pub struct BotConfig {
     pub name: String,
     #[serde(default = "default_key_file")]
     pub key_file: String,
+    #[serde(default)]
+    pub initial_budget: f64,
+    #[serde(default = "default_true")]
+    pub truncate_key_file: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +57,12 @@ pub struct MarketConfig {
     pub asset: String,
     #[serde(default = "default_interval")]
     pub interval_minutes: u32,
+    #[serde(default = "default_true")]
+    pub resolve_strike_price: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for MarketConfig {
@@ -60,6 +70,7 @@ impl Default for MarketConfig {
         Self {
             asset: default_asset(),
             interval_minutes: default_interval(),
+            resolve_strike_price: true,
         }
     }
 }

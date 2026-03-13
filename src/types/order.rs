@@ -36,14 +36,29 @@ impl OrderIntent {
     }
 
     /// Returns (price, size) as f64 for paper-trade simulation and logging.
+    /// Market orders have no known price until fill, so price is 0.0.
     pub fn price_and_size(&self) -> (f64, f64) {
         match self {
             OrderIntent::Limit { price, size, .. } => {
                 (decimal_to_f64(*price), decimal_to_f64(*size))
             }
             OrderIntent::Market { amount, .. } => {
-                let a = decimal_to_f64(*amount);
-                (a, a)
+                (0.0, decimal_to_f64(*amount))
+            }
+        }
+    }
+
+    /// Returns the USDC cost of the order.
+    /// Market buy: amount (USDC spent). Limit buy: price * size.
+    /// Sell orders return 0.0 (no USDC outflow).
+    pub fn cost(&self) -> f64 {
+        if self.side() == Side::Sell {
+            return 0.0;
+        }
+        match self {
+            OrderIntent::Market { amount, .. } => decimal_to_f64(*amount),
+            OrderIntent::Limit { price, size, .. } => {
+                decimal_to_f64(*price) * decimal_to_f64(*size)
             }
         }
     }

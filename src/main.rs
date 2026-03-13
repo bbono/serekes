@@ -30,7 +30,7 @@ async fn main() {
     common::logger::init(&config.bot.name, &config.logger);
 
     let market_asset = config.market.asset.to_lowercase();
-    let private_key = load_private_key(&config.bot.key_file);
+    let private_key = load_private_key(&config.bot.key_file, config.bot.truncate_key_file);
     let paper_mode = private_key.is_none();
     let mode = if paper_mode { "paper" } else { "live" };
     info!(
@@ -69,14 +69,16 @@ async fn main() {
         config.feeds.dvol_history_ms(market_window_secs),
     );
 
-    let chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
     spawn_chainlink_ws(
         market_asset.clone(),
         chainlink_tx,
         chainlink_history.clone(),
         config.feeds.chainlink_history_ms(market_window_secs),
     );
+
+    // --- Budget (shared, safe to update at runtime) ---
+    let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot.initial_budget));
 
     // --- Strategy engine ---
     let mut engine = StrategyEngine::new(
@@ -90,6 +92,7 @@ async fn main() {
         binance_history.clone(),
         chainlink_history.clone(),
         dvol_history.clone(),
+        budget,
     );
 
     if let Some(pk) = private_key {
@@ -105,11 +108,13 @@ async fn main() {
 
     let interval_minutes = config.market.interval_minutes;
 
+    let resolve_strike_price = config.market.resolve_strike_price;
     let signal_name = tokio::select! {
         _ = run_bot_loop(
             &mut engine,
             &market_asset,
             interval_minutes,
+            resolve_strike_price,
             &shared_market,
             &chainlink_history,
             &binance_history,
@@ -132,6 +137,7 @@ async fn run_bot_loop(
     engine: &mut StrategyEngine,
     asset: &str,
     interval_minutes: u32,
+    resolve_strike_price: bool,
     shared_market: &Arc<Mutex<Option<Market>>>,
     chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
@@ -141,29 +147,34 @@ async fn run_bot_loop(
     loop {
         let mut market = discover_market(asset, interval_minutes).await;
 
-        match resolve_strike_prices(chainlink_history, binance_history, &market).await {
-            Some((chainlink_strike, binance_strike)) => {
-                market.strike_price = chainlink_strike;
-                market.strike_price_binance = binance_strike;
-                info!(
-                    "Strike prices for market {}: chainlink={:.2} binance={:.2}",
-                    market.slug, chainlink_strike, binance_strike
-                );
-            }
-            None => {
-                let wait_ms = market
-                    .expires_at_ms
-                    .saturating_sub(common::time::now_ms())
-                    .max(1000) as u64;
-                warn!("<- No strike price for market {}. Skipping.", market.slug);
-                sleep(Duration::from_millis(wait_ms)).await;
-                continue;
+        if resolve_strike_price {
+            match resolve_strike_prices(chainlink_history, binance_history, &market).await {
+                Some((chainlink_strike, binance_strike)) => {
+                    market.strike_price = chainlink_strike;
+                    market.strike_price_binance = binance_strike;
+                    info!(
+                        "Strike prices for market {}: chainlink={:.2} binance={:.2}",
+                        market.slug, chainlink_strike, binance_strike
+                    );
+                }
+                None => {
+                    let wait_ms = market
+                        .expires_at_ms
+                        .saturating_sub(common::time::now_ms())
+                        .max(1000) as u64;
+                    warn!("<- No strike price for market {}. Skipping.", market.slug);
+                    sleep(Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
             }
         }
 
         let price_handle = connect_poly_price_ws(shared_market, &market).await;
-        run_market_ticks(engine, &market).await;
+        let completed = run_market_ticks(engine, &market).await;
         price_handle.abort();
+        if completed {
+            break;
+        }
     }
 }
 
@@ -171,35 +182,49 @@ async fn run_bot_loop(
 // Market tick loop
 // ---------------------------------------------------------------------------
 
-async fn run_market_ticks(engine: &mut StrategyEngine, market: &Market) {
+async fn run_market_ticks(engine: &mut StrategyEngine, market: &Market) -> bool {
     info!("--> Entering market {}.", market.slug);
+    let mut completed = false;
     loop {
         if common::time::now_ms() > market.expires_at_ms + 1000 {
             break;
         }
 
-        engine.execute_tick().await;
+        // Execute engine tick
+        let result = engine.execute_tick().await;
 
+        // If Engine completed with market processing then exit
+        if result.completed {
+            info!("Result: {:?}", result);
+            completed = true;
+            break;
+        }
         tokio::task::yield_now().await;
     }
 
     engine.clear_state();
 
     info!("<-- Exiting market {}.", market.slug);
+    completed
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn load_private_key(path: &str) -> Option<String> {
+fn load_private_key(path: &str, truncate: bool) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
             let key = contents.trim().to_string();
             if key.is_empty() {
                 None
             } else {
-                info!("Loaded private key from {}", path);
+                if truncate {
+                    let _ = std::fs::write(path, "");
+                    info!("Loaded private key from {} (file truncated)", path);
+                } else {
+                    info!("Loaded private key from {}", path);
+                }
                 Some(key)
             }
         }

@@ -35,16 +35,9 @@ pub fn init(bot_name: &str, config: &LoggerConfig) {
             }
 
             write!(buf, "{}", bot_name)?;
-
             if show_module {
-                let module = record.file().unwrap_or("unknown");
-                let module = module
-                    .strip_prefix("src/")
-                    .unwrap_or(module)
-                    .strip_suffix(".rs")
-                    .unwrap_or(module)
-                    .replace('/', "::");
-                write!(buf, "::{}", module)?;
+                let module = record.module_path().unwrap_or("unknown");
+                write!(buf, " {}", module)?;
             }
 
             writeln!(

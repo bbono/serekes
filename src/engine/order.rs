@@ -1,27 +1,43 @@
 use crate::types::{OrderIntent, TokenDirection, Trade};
 use log::{error, info, warn};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
-use polymarket_client_sdk::clob::types::{Amount, OrderStatusType};
+use polymarket_client_sdk::clob::types::{Amount, OrderStatusType, Side};
 use polymarket_client_sdk::types::{Decimal, U256};
 use std::str::FromStr;
 
 use super::StrategyEngine;
 
 impl StrategyEngine {
-    pub(super) async fn try_order(
-        &mut self,
-        ctx: &crate::types::TickContext,
-    ) -> Option<Trade> {
+    pub(super) async fn try_order(&mut self, ctx: &crate::types::TickContext) -> Option<Trade> {
+        
         let market = ctx.market.as_ref()?;
         let (direction, intent) = self.strategy.create_order(ctx)?;
 
+        if intent.side() == Side::Buy {
+            let budget = *self.budget.lock().unwrap_or_else(|e| e.into_inner());
+            let cost = intent.cost();
+            if cost > budget {
+                warn!(
+                    "Insufficient budget: cost={:.2} budget={:.2}. Skipping.",
+                    cost, budget
+                );
+                return None;
+            }
+        }
+
         // --- Validate minimum order size ---
-        if market.min_order_size > 0.0 {
+        // Market orders: Polymarket-wide minimum is 1 USDC (amount).
+        // Limit orders: per-market minimum from Gamma API (market.min_order_size, typically 5).
+        {
             let (_, size) = intent.price_and_size();
-            if size < market.min_order_size {
+            let min_size = match &intent {
+                OrderIntent::Market { .. } => 1.0,
+                OrderIntent::Limit { .. } => market.min_order_size,
+            };
+            if min_size > 0.0 && size < min_size {
                 warn!(
                     "Order size {:.4} below minimum {:.4}. Skipping.",
-                    size, market.min_order_size
+                    size, min_size
                 );
                 return None;
             }
@@ -35,6 +51,16 @@ impl StrategyEngine {
         // --- Submit or simulate ---
         let (order_id, order_status, making, taking): (String, OrderStatusType, Decimal, Decimal) =
             if !self.paper_mode {
+                let time_from_last_failed_order_ms =
+                    crate::common::time::now_ms() - self.last_try_order_failed_timestamp_ms;
+                if time_from_last_failed_order_ms <= 3000 {
+                    error!(
+                        "Last order failed {:0}ms from now.",
+                        time_from_last_failed_order_ms
+                    );
+                    return None;
+                }
+                self.last_try_order_failed_timestamp_ms = 0;
                 match self.sign_and_submit(&token_id, &intent).await {
                     Ok(resp) => {
                         match &resp.status {

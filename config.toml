@@ -1,16 +1,25 @@
-# ─── Bot Identity ─────────────────────────────────────────────────────────────
+# ─── Bot ─────────────────────────────────────────────────────────────
 
 [bot]
 # Unique name for this bot instance. Used in logs and alerts to identify
 # which bot produced the output. Required — bot will not start without it.
 # No default.
-name = "serekes-1"
+name = "bono"
 
 # Path to a file containing the Polygon wallet private key (hex string).
 # If the file exists and contains a valid key → bot runs in LIVE mode (real orders).
 # If the file is missing or empty → bot runs in PAPER mode (simulated fills).
 # Default: ".key"
 key_file = ".key"
+
+# Whether to empty the key file after reading the private key,
+# so the key doesn't remain on disk.
+# Default: true
+truncate_key_file = true
+
+# Starting budget in USDC for this bot instance.
+# Default: 0.00
+initial_budget = 1.00
 
 # ─── Market ───────────────────────────────────────────────────────────────────
 
@@ -28,6 +37,13 @@ asset = "btc"
 # Supported: 5, 15
 # Default: 5
 interval_minutes = 5
+
+# Whether to resolve the strike price from Chainlink/Binance history before
+# trading a market. When true, the bot waits for a matching price in the
+# history buffers; if no strike is found, the market is skipped.
+# Set to false for strategies that don't need a strike price.
+# Default: true
+resolve_strike_price = false
 
 # ─── Logger ────────────────────────────────────────────────────────────────────
 

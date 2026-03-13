@@ -15,6 +15,9 @@ pub struct TickContext {
     pub binance_price: f64,
     /// Unix ms when binance_price was last updated.
     pub binance_ts: i64,
+    /// false when Binance and Coinbase prices diverge beyond threshold.
+    /// Strategies should avoid using binance_price for entry decisions when false.
+    pub binance_reliable: bool,
 
     /// Current spot price from Coinbase ticker stream.
     pub coinbase_price: f64,
@@ -51,4 +54,13 @@ pub struct TickContext {
 
     /// All trades placed by the engine during this market, oldest first.
     pub trades: Vec<Trade>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TickResult {
+    pub traded: bool,
+    pub trades: Vec<Trade>,
+    pub timestamp_ms: i64,
+    pub completed: bool,
 }

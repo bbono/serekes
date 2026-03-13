@@ -31,7 +31,7 @@ impl Strategy for BonoStrategy {
                 direction,
                 OrderIntent::Market {
                     side: Side::Buy,
-                    amount: Decimal::new(50, 2), // 0.50 USDC
+                    amount: Decimal::new(1, 0), // 0.50 USDC
                     order_type: OrderType::FOK,
                 },
             ))
