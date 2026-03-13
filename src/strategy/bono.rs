@@ -12,11 +12,13 @@ impl BonoStrategy {
 }
 
 impl Strategy for BonoStrategy {
-    fn create_order(
-        &self,
-        ctx: &TickContext,
-    ) -> Option<(TokenDirection, OrderIntent)> {
+    fn create_order(&self, ctx: &TickContext) -> Option<(TokenDirection, OrderIntent)> {
         let market = ctx.market.as_ref()?;
+       
+        if market.time_to_expire_ms() > 30_000 {
+            return None;
+        }
+
         let up_price = market.up.best_ask;
         let down_price = market.down.best_ask;
 
@@ -26,7 +28,7 @@ impl Strategy for BonoStrategy {
             (TokenDirection::Down, down_price)
         };
 
-        if price > 0.85 {
+        if price > 0.85 && price <= 0.97 {
             Some((
                 direction,
                 OrderIntent::Market {

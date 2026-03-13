@@ -145,7 +145,7 @@ async fn run_bot_loop(
     wait_for_feeds(engine).await;
 
     loop {
-        info!("------------- Entering market ------------- ");
+        info!(">>>>>>>>>>>>> Entering market >>>>>>>>>>>>>");
         let mut market = discover_market(asset, interval_minutes).await;
 
         if resolve_strike_price {
@@ -174,15 +174,16 @@ async fn run_bot_loop(
         trade_market(engine, &market).await;
         engine.clear_state();
         price_handle.abort();
-
+        info!("<<<<<<<<<<<<< Exiting market <<<<<<<<<<<<<");
         // Wait for another market
         let remaining_ms = market.expires_at_ms.saturating_sub(common::time::now_ms());
         if remaining_ms > 0 {
             info!(
-                "Engine completed. Waiting {:.1}s for market {} to end...",
+                "Waiting {:.1}s for market {} to end...",
                 remaining_ms as f64 / 1000.0,
                 market.slug
             );
+
             sleep(Duration::from_millis((remaining_ms + 1000) as u64)).await;
         }
     }

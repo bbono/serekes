@@ -15,9 +15,6 @@ pub struct TickContext {
     pub binance_price: f64,
     /// Unix ms when binance_price was last updated.
     pub binance_ts: i64,
-    /// false when Binance and Coinbase prices diverge beyond threshold.
-    /// Strategies should avoid using binance_price for entry decisions when false.
-    pub binance_reliable: bool,
 
     /// Current spot price from Coinbase ticker stream.
     pub coinbase_price: f64,

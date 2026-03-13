@@ -19,7 +19,7 @@ truncate_key_file = true
 
 # Starting budget in USDC for this bot instance.
 # Default: 0.00
-initial_budget = 2.00
+initial_budget = 4.00
 
 # ─── Market ───────────────────────────────────────────────────────────────────
 
@@ -86,16 +86,3 @@ show_module = true
 # Supported: "bono", "konzerva"
 # No default.
 strategy = "bono"
-
-# Killswitch: maximum allowed absolute price difference ($) between Binance
-# and Coinbase spot prices. If exceeded (and both prices > 0), all order
-# placement is blocked until prices converge. Protects against feed outages
-# or flash crashes on a single exchange.
-# Default: 50.0
-exchange_price_divergence_threshold = 50.0
-
-# Minimum seconds between repeated log messages from the engine (e.g.
-# killswitch warnings). Supports decimals. Lower values give more verbose
-# output; higher values reduce log noise.
-# Default: 0.5
-log_interval_secs = 1.0

@@ -5,7 +5,7 @@ use crate::strategy::Strategy;
 use crate::strategy::{BonoStrategy, KonzervaStrategy};
 use crate::types::{Market, TickContext, TickResult, Trade};
 use alloy_signer_local::PrivateKeySigner;
-use log::{info, warn};
+use log::info;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::clob::Client as ClobClient;
@@ -24,7 +24,6 @@ fn create_strategy(name: &str) -> Box<dyn Strategy> {
 pub struct StrategyEngine {
     strategy: Box<dyn Strategy>,
     pub paper_mode: bool,
-    pub config: EngineConfig,
 
     // Auth / SDK
     client: Option<ClobClient<Authenticated<Normal>>>,
@@ -32,9 +31,6 @@ pub struct StrategyEngine {
 
     // Trade history for current market
     trades: Vec<Trade>,
-
-    // Loop counters
-    last_log_ts: i64,
 
     // Last try_order invocation timestamp (ms)
     pub last_try_order_failed_timestamp_ms: i64,
@@ -71,11 +67,9 @@ impl StrategyEngine {
         Self {
             strategy,
             paper_mode,
-            config,
             client: None,
             signer_instance: None,
             trades: Vec::new(),
-            last_log_ts: 0,
             last_try_order_failed_timestamp_ms: 0,
             binance_rx,
             coinbase_rx,
@@ -101,7 +95,6 @@ impl StrategyEngine {
     /// Resets per-market state. Call between market rotations.
     pub fn clear_state(&mut self) {
         self.trades.clear();
-        self.last_log_ts = 0;
         self.last_try_order_failed_timestamp_ms = 0;
     }
 
@@ -145,9 +138,6 @@ impl StrategyEngine {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
 
-        let binance_reliable =
-            self.check_binance_reliable(binance_price, coinbase_price, polymarket_now_ms);
-
         TickContext {
             binance_price,
             binance_ts,
@@ -158,7 +148,6 @@ impl StrategyEngine {
             dvol,
             dvol_ts,
             polymarket_now_ms,
-            binance_reliable,
             market,
             binance_history: self.binance_history.clone(),
             chainlink_history: self.chainlink_history.clone(),
@@ -167,27 +156,4 @@ impl StrategyEngine {
         }
     }
 
-    fn check_binance_reliable(
-        &mut self,
-        binance_price: f64,
-        coinbase_price: f64,
-        now_ms: i64,
-    ) -> bool {
-        let divergence = (binance_price - coinbase_price).abs();
-        if divergence > self.config.exchange_price_divergence_threshold
-            && coinbase_price > 0.0
-            && binance_price > 0.0
-        {
-            let log_interval_ms = (self.config.log_interval_secs * 1000.0) as i64;
-            if now_ms - self.last_log_ts >= log_interval_ms {
-                self.last_log_ts = now_ms;
-                warn!(
-                    "Binance unreliable! Binance=${:.2} Coinbase=${:.2} divergence=${:.2}",
-                    binance_price, coinbase_price, divergence
-                );
-            }
-            return false;
-        }
-        true
-    }
 }

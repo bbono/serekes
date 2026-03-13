@@ -49,4 +49,15 @@ impl Market {
             min_order_size,
         }
     }
+
+    /// Milliseconds remaining until this market expires.
+    pub fn time_to_expire_ms(&self) -> i64 {
+        self.expires_at_ms.saturating_sub(crate::common::time::now_ms())
+    }
+
+    /// Milliseconds elapsed since this market started.
+    #[allow(dead_code)]
+    pub fn time_from_started_ms(&self) -> i64 {
+        crate::common::time::now_ms().saturating_sub(self.started_at_ms)
+    }
 }

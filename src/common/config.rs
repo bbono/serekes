@@ -108,10 +108,6 @@ impl FeedsConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EngineConfig {
     pub strategy: String,
-    #[serde(default = "default_killswitch")]
-    pub exchange_price_divergence_threshold: f64,
-    #[serde(default = "default_log_interval")]
-    pub log_interval_secs: f64,
 }
 
 
@@ -121,8 +117,6 @@ fn default_show_timestamp() -> bool { true }
 fn default_show_module() -> bool { true }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
-fn default_killswitch() -> f64 { 50.0 }
-fn default_log_interval() -> f64 { 0.5 }
 
 impl AppConfig {
     pub fn load(path: &str) -> Self {
@@ -191,21 +185,6 @@ impl AppConfig {
             ));
         }
 
-        // engine.exchange_price_divergence_threshold
-        if self.engine.exchange_price_divergence_threshold <= 0.0 {
-            errors.push(format!(
-                "engine.exchange_price_divergence_threshold must be > 0, got {}",
-                self.engine.exchange_price_divergence_threshold
-            ));
-        }
-
-        // engine.log_interval_secs
-        if self.engine.log_interval_secs < 0.0 {
-            errors.push(format!(
-                "engine.log_interval_secs must be >= 0, got {}",
-                self.engine.log_interval_secs
-            ));
-        }
 
         // feeds.*_history_secs
         if let Some(0) = self.feeds.binance_history_secs {

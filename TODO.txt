@@ -2,3 +2,32 @@
 [2026-03-12T15:00:31Z INFO  bot] Created order: ExecuteOrderResponse { side: Buy, direction: Down, price: 1.0, size: 1.0, order_params: Market { amount: 1.0, order_type: FOK }, order_id: "", success: false, error_msg: Some("Order post failed: Error { kind: Status, source: Some(Status { status_code: 400, method: POST, path: \"/order\", message: \"{\\\"error\\\":\\\"order couldn't be fully filled. FOK orders are fully filled or killed.\\\"}\\n\" }), backtrace: <disabled> }") }
 2. Market Order - price
 3. Heartbeat order?
+4. Implement rate limiting 
+POST /order (single order):                                                                                                                                                                                                                                                
+  - Burst: 3,500 req / 10s                                                                                                                                                                                                                                                   
+  - Sustained: 36,000 req / 10 min                                                                                                                                                                                                                                           
+                                                                                                                                                                                                                                                                             
+  POST /orders (batch orders):                              
+  - Burst: 1,000 req / 10s
+  - Sustained: 15,000 req / 10 min
+
+  Key details:
+  - Trading endpoints enforce dual limits (burst + sustained)
+  - Requests are throttled (delayed/queued), not immediately rejected
+  - Uses sliding time windows
+  - Batch orders: max 15 orders per request
+
+  These limits are very generous — effectively ~350 single orders/sec burst. Unlikely to be a concern unless you're doing high-frequency trading at extreme volume.
+2. Check if divergence is real
+WARN  Binance unreliable! Binance=$72550.96 Coinbase=$72601.11 divergence=$50.15
+3. if post error then throttle
+4. External problem
+2026-03-13T15:10:45Z bono serekes INFO  Loaded private key from .key (file truncated)
+2026-03-13T15:10:45Z bono serekes INFO  Starting Serekeš [BTC] | mode=live
+2026-03-13T15:10:45Z bono serekes::common::time INFO  Time sync: server=1773414645s local=1773414645764ms offset=-764ms
+2026-03-13T15:10:45Z bono serekes::feeds::deribit INFO  Connected to Deribit DVOL WS
+2026-03-13T15:10:46Z bono serekes::feeds::chainlink INFO  Connected to Chainlink WS
+
+thread 'tokio-runtime-worker' (726615) panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/polymarket-client-sdk-0.4.3/src/clob/client.rs:2038:30:
+`period` must be non-zero.
+2026-03-13T15:10:46Z bono serekes INFO  Polymarket SDK authenticated.
