@@ -1,6 +1,7 @@
 use crate::engine::traits::Strategy;
-use crate::types::{OrderParams, TickContext, TokenDirection};
-use polymarket_client_sdk::clob::types::OrderType;
+use crate::types::{OrderIntent, TickContext, TokenDirection};
+use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::types::Decimal;
 
 pub struct BonoStrategy;
 
@@ -14,7 +15,7 @@ impl Strategy for BonoStrategy {
     fn create_entry_order(
         &self,
         ctx: &TickContext,
-    ) -> Option<(TokenDirection, OrderParams)> {
+    ) -> Option<(TokenDirection, OrderIntent)> {
         let market = ctx.market.as_ref()?;
         let up_price = market.up.best_ask;
         let down_price = market.down.best_ask;
@@ -28,8 +29,9 @@ impl Strategy for BonoStrategy {
         if price > 0.30 {
             Some((
                 direction,
-                OrderParams::Market {
-                    amount: 0.5,
+                OrderIntent::Market {
+                    side: Side::Buy,
+                    amount: Decimal::new(50, 2), // 0.50 USDC
                     order_type: OrderType::FOK,
                 },
             ))
