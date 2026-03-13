@@ -306,55 +306,16 @@ fn spawn_poly_price_ws(
                                     continue;
                                 }
 
-                                // Determine which field to update based on side
-                                let (new_bid, new_ask) = if is_up {
-                                    match entry.side {
-                                        Side::Buy => (price_f64, m.up.best_ask),
-                                        _ => (m.up.best_bid, price_f64),
-                                    }
-                                } else {
-                                    match entry.side {
-                                        Side::Buy => (price_f64, m.down.best_ask),
-                                        _ => (m.down.best_bid, price_f64),
-                                    }
-                                };
-
-                                if new_bid <= 0.0 || new_ask <= 0.0 {
-                                    // Only one side known so far, update anyway
-                                    if is_up {
-                                        match entry.side {
-                                            Side::Buy => m.up.best_bid = price_f64,
-                                            _ => m.up.best_ask = price_f64,
-                                        }
-                                    } else {
-                                        match entry.side {
-                                            Side::Buy => m.down.best_bid = price_f64,
-                                            _ => m.down.best_ask = price_f64,
-                                        }
-                                    }
-                                    continue;
-                                }
-
-                                // Validate: up mid + down mid should be ~1.0
-                                let (new_up_mid, new_down_mid) = if is_up {
-                                    ((new_bid + new_ask) / 2.0, (m.down.best_bid + m.down.best_ask) / 2.0)
-                                } else {
-                                    ((m.up.best_bid + m.up.best_ask) / 2.0, (new_bid + new_ask) / 2.0)
-                                };
-                                let sum = new_up_mid + new_down_mid;
-                                if new_down_mid > 0.0
-                                    && new_up_mid > 0.0
-                                    && (sum < 0.9 || sum > 1.1)
-                                {
-                                    continue;
-                                }
-
                                 if is_up {
-                                    m.up.best_bid = new_bid;
-                                    m.up.best_ask = new_ask;
+                                    match entry.side {
+                                        Side::Buy => m.up.best_bid = price_f64,
+                                        _ => m.up.best_ask = price_f64,
+                                    }
                                 } else {
-                                    m.down.best_bid = new_bid;
-                                    m.down.best_ask = new_ask;
+                                    match entry.side {
+                                        Side::Buy => m.down.best_bid = price_f64,
+                                        _ => m.down.best_ask = price_f64,
+                                    }
                                 }
                             }
                         }
