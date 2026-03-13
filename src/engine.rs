@@ -257,6 +257,12 @@ impl<S: Strategy> StrategyEngine<S> {
             )
         };
 
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + self.time_offset_ms;
+
         // --- Resolve fill price/size ---
         let (price, size) = if self.paper_mode {
             match &intent {
@@ -302,6 +308,7 @@ impl<S: Strategy> StrategyEngine<S> {
             size,
             order_id,
             order_status,
+            timestamp_ms,
         })
     }
 
