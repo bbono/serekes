@@ -11,7 +11,7 @@
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
 4. Sync server time offset with Polymarket CLOB
 5. Init Telegram, build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
-6. Authenticate Polymarket SDK (if private key present → live mode)
+6. Authenticate Polymarket SDK (if private key present → live mode). Heartbeat background task auto-starts on auth — keeps resting orders alive for future GTC/GTD strategies.
 7. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
 
 ```mermaid
@@ -182,15 +182,23 @@ stateDiagram-v2
 - **Live mode**: Signs order → submits. On success → Idle + PnL logged. On failure → stays InPosition.
 - **Sim mode**: Calculates PnL from entry price, resets to Idle.
 
+### Pre-submission validation (engine)
+
+- Checks order size against market's `min_order_size` (from Gamma API). Orders below minimum are skipped with a warning.
+
 ### sign_and_submit (engine)
 
 Handles both Limit and Market order types:
 - Converts price/size to `Decimal` (2 decimal places for limit, 4 for market price)
 - Validates amounts > 0 before submission
-- Builds the order via SDK builder pattern
+- Builds the order via SDK builder pattern (SDK auto-validates tick size and fetches neg_risk)
 - Signs with wallet private key (Polygon chain)
 - Posts to Polymarket CLOB
-- Returns success/failure
+- Handles response status: `Matched` (filled), `Delayed` (matching delay), `Unmatched` (no fill), `Live` (resting)
+
+### Heartbeat (SDK auto-managed)
+
+When the `heartbeats` SDK feature is enabled, the SDK automatically starts a background task on authentication that sends periodic heartbeat signals to the CLOB (`POST /heartbeats`). This prevents automatic cancellation of resting orders (GTC/GTD). The current Bono strategy uses FOK orders only, but future strategies using limit orders will benefit from this. The heartbeat interval is configurable via `ClobConfig` (default 5s).
 
 ## Market Discovery
 
@@ -200,10 +208,11 @@ On startup (and after each market expires):
 2. Checks two slugs: current bucket and next bucket (e.g. `btc-updown-5m-1710000000`)
 3. Fetches market metadata from Polymarket Gamma API (`event_by_slug`)
 4. Extracts Up/Down token IDs from market outcomes (matches "UP"/"YES" and "DOWN"/"NO")
-5. Fetches strike price from Binance kline API (candle open price at bucket start)
-6. Looks up chainlink strike price from history (exact timestamp match with `started_ms`)
-7. Creates `Market` struct in `shared_market` with both strike prices
-8. Subscribes to Polymarket price WebSocket for both tokens
+5. Extracts `tick_size` and `min_order_size` from Gamma market metadata
+6. Fetches strike price from Binance kline API (candle open price at bucket start)
+7. Looks up chainlink strike price from history (exact timestamp match with `started_ms`)
+8. Creates `Market` struct in `shared_market` with both strike prices, tick_size, and min_order_size
+9. Subscribes to Polymarket price WebSocket for both tokens
 
 ## Data Feeds
 

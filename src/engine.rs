@@ -1,36 +1,19 @@
-pub mod strategies;
-pub mod traits;
-
-pub use strategies::BonoStrategy;
-pub use traits::Strategy;
-
 use crate::config::EngineConfig;
-use crate::types::{Market, OrderIntent, TickContext, TokenDirection, Trade};
-use alloy_signer_local::{LocalSigner, PrivateKeySigner};
+use crate::types::{EngineState, Market, OrderIntent, Strategy, TickContext, TokenDirection, Trade};
 use log::{error, info, warn};
+use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use polymarket_client_sdk::auth::state::Authenticated;
-use polymarket_client_sdk::auth::{Normal, Signer as SDKSigner};
+use polymarket_client_sdk::auth::{Normal, Signer as _};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
-use polymarket_client_sdk::clob::types::{Amount, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, OrderStatusType, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
-use polymarket_client_sdk::types::Decimal;
+use polymarket_client_sdk::types::{Decimal, U256};
 use polymarket_client_sdk::POLYGON;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
-
-
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EngineState {
-    Idle,
-    InPosition,
-}
 
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,
@@ -214,21 +197,53 @@ impl<S: Strategy> StrategyEngine<S> {
     ) -> Option<Trade> {
         let market = ctx.market.as_ref()?;
         let (direction, intent) = self.strategy.create_entry_order(ctx)?;
+
+        // --- Validate minimum order size ---
+        if market.min_order_size > 0.0 {
+            let (_, size) = intent.price_and_size();
+            if size < market.min_order_size {
+                warn!(
+                    "Order size {:.4} below minimum {:.4}. Skipping.",
+                    size, market.min_order_size
+                );
+                return None;
+            }
+        }
+
         let token_id = match direction {
             TokenDirection::Up => market.up.token_id.clone(),
             TokenDirection::Down => market.down.token_id.clone(),
         };
 
         // --- Submit or simulate ---
-        let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
+        let (order_id, success, error_msg, making, taking): (String, bool, Option<String>, Decimal, Decimal) = if !self.paper_mode {
             match self.sign_and_submit(&token_id, &intent).await {
-                Ok(resp) => (
-                    resp.order_id,
-                    resp.success,
-                    resp.error_msg,
-                    resp.making_amount,
-                    resp.taking_amount,
-                ),
+                Ok(resp) => {
+                    match &resp.status {
+                        OrderStatusType::Matched => {
+                            info!("Order {} matched immediately", resp.order_id);
+                        }
+                        OrderStatusType::Delayed => {
+                            warn!("Order {} delayed by matching engine", resp.order_id);
+                        }
+                        OrderStatusType::Unmatched => {
+                            warn!("Order {} unmatched (placement ok, no fill)", resp.order_id);
+                        }
+                        OrderStatusType::Live => {
+                            info!("Order {} resting on book", resp.order_id);
+                        }
+                        _ => {
+                            warn!("Order {} unexpected status: {:?}", resp.order_id, resp.status);
+                        }
+                    }
+                    (
+                        resp.order_id,
+                        resp.success,
+                        resp.error_msg,
+                        resp.making_amount,
+                        resp.taking_amount,
+                    )
+                }
                 Err(e) => {
                     error!("Order failed: {}", e);
                     return None;
@@ -281,7 +296,7 @@ impl<S: Strategy> StrategyEngine<S> {
         if success {
             self.state = EngineState::InPosition;
         } else {
-            let msg = error_msg.as_deref().unwrap_or_default();
+            let msg: &str = error_msg.as_deref().unwrap_or_default();
             error!("Order rejected: {}", msg);
         }
 
@@ -309,17 +324,21 @@ impl<S: Strategy> StrategyEngine<S> {
             return Err("client not initialized".into());
         };
 
-        let signable = match intent {
+        let token_u256 = U256::from_str(token_id)
+            .map_err(|e| format!("Invalid token_id: {:?}", e))?;
+
+        let order = match intent {
             OrderIntent::Limit { side, price, size, order_type } => {
                 client
                     .limit_order()
-                    .order_type(*order_type)
-                    .token_id(token_id)
+                    .order_type(order_type.clone())
+                    .token_id(token_u256)
                     .side(*side)
                     .price(*price)
                     .size(*size)
                     .build()
                     .await
+                    .map_err(|e| format!("Order build failed: {:?}", e))?
             }
             OrderIntent::Market { side, amount, order_type } => {
                 let amt = if *side == polymarket_client_sdk::clob::types::Side::Buy {
@@ -331,16 +350,16 @@ impl<S: Strategy> StrategyEngine<S> {
 
                 client
                     .market_order()
-                    .order_type(*order_type)
-                    .token_id(token_id)
+                    .order_type(order_type.clone())
+                    .token_id(token_u256)
                     .side(*side)
                     .amount(amt)
                     .build()
                     .await
+                    .map_err(|e| format!("Order build failed: {:?}", e))?
             }
         };
 
-        let order = signable.map_err(|e| format!("Order build failed: {:?}", e))?;
         let signed_order = client
             .sign(signer, order)
             .await
