@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::clob::types::{OrderStatusType, OrderType, Side};
 use polymarket_client_sdk::types::Decimal;
 
 // ---------------------------------------------------------------------------
@@ -196,6 +196,6 @@ pub struct Trade {
     pub price: f64,
     pub size: f64,
     pub order_id: String,
-    pub success: bool,
-    pub error_msg: Option<String>,
+    pub order_status: OrderStatusType,
+    pub timestamp_ms: i64,
 }

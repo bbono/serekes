@@ -195,6 +195,7 @@ Handles both Limit and Market order types:
 - Signs with wallet private key (Polygon chain)
 - Posts to Polymarket CLOB
 - Handles response status: `Matched` (filled), `Delayed` (matching delay), `Unmatched` (no fill), `Live` (resting)
+- Stores the `OrderStatusType` from the CLOB response in the returned `Trade.order_status` field (paper mode defaults to `Matched`)
 
 ### Heartbeat (SDK auto-managed)
 

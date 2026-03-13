@@ -216,7 +216,7 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         // --- Submit or simulate ---
-        let (order_id, success, error_msg, making, taking): (String, bool, Option<String>, Decimal, Decimal) = if !self.paper_mode {
+        let (order_id, order_status, making, taking): (String, OrderStatusType, Decimal, Decimal) = if !self.paper_mode {
             match self.sign_and_submit(&token_id, &intent).await {
                 Ok(resp) => {
                     match &resp.status {
@@ -238,8 +238,7 @@ impl<S: Strategy> StrategyEngine<S> {
                     }
                     (
                         resp.order_id,
-                        resp.success,
-                        resp.error_msg,
+                        resp.status,
                         resp.making_amount,
                         resp.taking_amount,
                     )
@@ -252,12 +251,17 @@ impl<S: Strategy> StrategyEngine<S> {
         } else {
             (
                 "PAPERTRADE-1".to_string(),
-                true,
-                None,
+                OrderStatusType::Matched,
                 Decimal::default(),
                 Decimal::default(),
             )
         };
+
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + self.time_offset_ms;
 
         // --- Resolve fill price/size ---
         let (price, size) = if self.paper_mode {
@@ -280,7 +284,7 @@ impl<S: Strategy> StrategyEngine<S> {
                     (p, s)
                 }
             }
-        } else if success && matches!(intent, OrderIntent::Market { .. }) {
+        } else if order_status == OrderStatusType::Matched && matches!(intent, OrderIntent::Market { .. }) {
             let making_f64: f64 = making.try_into().unwrap_or(0.0);
             let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
             if taking_f64 > 0.0 {
@@ -293,11 +297,8 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         // --- Update state ---
-        if success {
+        if order_status == OrderStatusType::Matched {
             self.state = EngineState::InPosition;
-        } else {
-            let msg: &str = error_msg.as_deref().unwrap_or_default();
-            error!("Order rejected: {}", msg);
         }
 
         Some(Trade {
@@ -306,8 +307,8 @@ impl<S: Strategy> StrategyEngine<S> {
             price,
             size,
             order_id,
-            success,
-            error_msg,
+            order_status,
+            timestamp_ms,
         })
     }
 
