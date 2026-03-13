@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::types::Decimal;
+
 // ---------------------------------------------------------------------------
 // Market types
 // ---------------------------------------------------------------------------
@@ -58,74 +61,52 @@ impl Market {
 }
 
 // ---------------------------------------------------------------------------
-// Order types
+// Order types (Side, OrderType, Decimal come from polymarket_client_sdk)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub enum Side {
-    Buy,
-    Sell,
-}
-
-/// Describes how to place an order. The engine signs and submits it
-/// to the Polymarket CLOB via the SDK.
-///
-/// The strategy chooses the order type; the engine handles signing,
-/// Decimal conversion, and error recovery.
+/// Everything the engine needs to submit an order to the CLOB.
+/// The strategy fully configures this; the engine only adds `token_id`
+/// (from direction routing) and calls `.build().await`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub enum OrderParams {
-    /// Limit order — placed via `client.limit_order()`.
-    /// Sits on the book at the exact price until filled or cancelled.
-    ///
-    /// `price`: limit price in Polymarket token units (0.01–0.99 range).
-    ///   For buys, this is the max you'll pay per share.
-    ///   For sells, this is the min you'll accept per share.
-    ///
-    /// `size`: number of shares (must be >= min order size on Polymarket,
-    ///   currently 5.0 shares). Rounded to 2 decimal places by the engine.
+pub enum OrderIntent {
     Limit {
-        price: f64,
-        size: f64,
-        order_type: MarketOrderType,
+        side: Side,
+        price: Decimal,
+        size: Decimal,
+        order_type: OrderType,
     },
-
-    /// Market order — placed via `client.market_order()`.
-    /// Fills immediately against resting orders at best available price.
-    ///
-    /// `amount`: for buy orders this is the USDC amount to spend.
-    ///   For sell orders this is the number of shares to sell.
-    ///
-    /// `order_type`: FAK (fill-and-kill, default) or FOK (fill-or-kill).
     Market {
-        amount: f64,
-        order_type: MarketOrderType,
+        side: Side,
+        amount: Decimal,
+        order_type: OrderType,
     },
 }
 
-/// Fill type for market orders.
-#[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
-pub enum MarketOrderType {
-    /// Fill-and-kill: fill as much as possible, cancel the rest.
-    FAK,
-    /// Fill-or-kill: fill entirely or cancel the whole order.
-    FOK,
-}
-
-impl OrderParams {
-    /// Returns (price, size) for the engine's state tracking.
-    ///
-    /// For limit orders: returns the exact price and size.
-    /// For market orders: returns (amount, amount) as a placeholder —
-    /// the engine reconciles the actual fill via on-chain position check.
-    pub fn price_and_size(&self) -> (f64, f64) {
+impl OrderIntent {
+    pub fn side(&self) -> Side {
         match self {
-            OrderParams::Limit { price, size, .. } => (*price, *size),
-            OrderParams::Market { amount, .. } => (*amount, *amount),
+            OrderIntent::Limit { side, .. } | OrderIntent::Market { side, .. } => *side,
         }
     }
+
+    /// Returns (price, size) as f64 for paper-trade simulation and logging.
+    pub fn price_and_size(&self) -> (f64, f64) {
+        match self {
+            OrderIntent::Limit { price, size, .. } => {
+                (decimal_to_f64(*price), decimal_to_f64(*size))
+            }
+            OrderIntent::Market { amount, .. } => {
+                let a = decimal_to_f64(*amount);
+                (a, a)
+            }
+        }
+    }
+}
+
+fn decimal_to_f64(d: Decimal) -> f64 {
+    d.try_into().unwrap_or(0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,11 +167,10 @@ pub struct TickContext {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct Trade {
-    pub side: Side,
     pub direction: TokenDirection,
+    pub intent: OrderIntent,
     pub price: f64,
     pub size: f64,
-    pub order_params: OrderParams,
     pub order_id: String,
     pub success: bool,
     pub error_msg: Option<String>,
