@@ -1,9 +1,9 @@
-mod auth;
 mod order;
 
 use crate::common::config::EngineConfig;
 use crate::strategy::{BonoStrategy, KonzervaStrategy};
-use crate::types::{Market, Strategy, TickContext, Trade};
+use crate::strategy::Strategy;
+use crate::types::{Market, TickContext, Trade};
 use alloy_signer_local::PrivateKeySigner;
 use log::warn;
 use polymarket_client_sdk::auth::state::Authenticated;
@@ -78,6 +78,15 @@ impl StrategyEngine {
             chainlink_history,
             dvol_history,
         }
+    }
+
+    pub fn set_client(
+        &mut self,
+        client: ClobClient<Authenticated<Normal>>,
+        signer: PrivateKeySigner,
+    ) {
+        self.client = Some(client);
+        self.signer_instance = Some(signer);
     }
 
     /// Resets per-market state. Call between market rotations.

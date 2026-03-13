@@ -1,6 +1,7 @@
 mod bot;
 mod common;
 mod engine;
+mod feeds;
 mod strategy;
 mod types;
 #[tokio::main]

@@ -1,4 +1,5 @@
-use crate::types::{OrderIntent, Strategy, TickContext, TokenDirection};
+use super::Strategy;
+use crate::types::{OrderIntent, TickContext, TokenDirection};
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use polymarket_client_sdk::types::Decimal;
 

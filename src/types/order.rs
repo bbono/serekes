@@ -1,5 +1,12 @@
-use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::clob::types::{OrderStatusType, OrderType, Side};
 use polymarket_client_sdk::types::Decimal;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub enum TokenDirection {
+    Up,
+    Down,
+}
 
 /// Everything the engine needs to submit an order to the CLOB.
 /// The strategy fully configures this; the engine only adds `token_id`
@@ -44,4 +51,16 @@ impl OrderIntent {
 
 fn decimal_to_f64(d: Decimal) -> f64 {
     d.try_into().unwrap_or(0.0)
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Trade {
+    pub direction: TokenDirection,
+    pub intent: OrderIntent,
+    pub price: f64,
+    pub size: f64,
+    pub order_id: String,
+    pub order_status: OrderStatusType,
+    pub timestamp_ms: i64,
 }

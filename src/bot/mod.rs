@@ -1,9 +1,11 @@
-mod feeds;
-mod market;
-
+use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{debug, error, info, warn};
+use polymarket_client_sdk::clob::types::SignatureType;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::auth::Signer as _;
+use polymarket_client_sdk::POLYGON;
 use std::collections::VecDeque;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -12,8 +14,10 @@ use tokio::time::{sleep, Duration};
 use crate::common::config::AppConfig;
 use crate::types::Market;
 use crate::engine::StrategyEngine;
-use feeds::{spawn_binance_ws, spawn_chainlink_ws, spawn_coinbase_ws, spawn_deribit_dvol_ws};
-use market::{connect_poly_price_ws, discover_market, resolve_strike_prices};
+use crate::feeds::{
+    spawn_binance_ws, spawn_chainlink_ws, spawn_coinbase_ws, spawn_deribit_dvol_ws,
+    connect_poly_price_ws, discover_market, resolve_strike_prices,
+};
 
 fn load_private_key(path: &str) -> Option<String> {
     match std::fs::read_to_string(path) {
@@ -28,6 +32,32 @@ fn load_private_key(path: &str) -> Option<String> {
         }
         Err(_) => {
             debug!("Key file not found: {}", path);
+            None
+        }
+    }
+}
+
+async fn authenticate_client(
+    private_key: &str,
+) -> Option<(
+    polymarket_client_sdk::clob::Client<polymarket_client_sdk::auth::state::Authenticated<polymarket_client_sdk::auth::Normal>>,
+    PrivateKeySigner,
+)> {
+    let signer: PrivateKeySigner = LocalSigner::from_str(private_key)
+        .unwrap()
+        .with_chain_id(Some(POLYGON));
+    let client_builder =
+        ClobClient::new("https://clob.polymarket.com", ClobConfig::default()).unwrap();
+
+    match client_builder
+        .authentication_builder(&signer)
+        .signature_type(SignatureType::Proxy)
+        .authenticate()
+        .await
+    {
+        Ok(client) => Some((client, signer)),
+        Err(e) => {
+            error!("SDK auth failed: {}", e);
             None
         }
     }
@@ -176,7 +206,8 @@ pub async fn run() {
     );
 
     if let Some(pk) = private_key {
-        if engine.initialize_client(&pk).await {
+        if let Some((client, signer)) = authenticate_client(&pk).await {
+            engine.set_client(client, signer);
             info!("Polymarket SDK authenticated.");
         }
     }
