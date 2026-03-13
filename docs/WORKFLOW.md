@@ -75,40 +75,25 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    START["execute_tick()"] --> CHECK_POS{"① IN-POSITION +
-    strategy manages exit?"}
-
-    CHECK_POS -->|YES| EXIT["strategy.create_exit_order(ctx, market, position_size)"]
-    EXIT -->|"Some(order)"| SELL["execute_sell() → state = Idle"] --> DONE_TRUE["return true (done)"]
-    EXIT -->|None| KS
-
-    CHECK_POS -->|NO| KS{"② KILLSWITCH
+    START["execute_tick()"] --> KS{"① KILLSWITCH
     |binance - coinbase| > threshold
     AND both > 0?"}
 
     KS -->|YES| BLOCK["log warning (rate-limited)
-    return false (block entries)"]
+    return None"]
 
-    KS -->|NO| IDLE{"③ IDLE +
-    no prior entry failure?"}
-
-    IDLE -->|NO| LOG
-    IDLE -->|YES| ENTRY["strategy.create_order(ctx, market)"]
-    ENTRY -->|None| LOG
-    ENTRY -->|"Some((direction, order))"| ORDER["try_order()"]
-    ORDER -->|entry_failed| DONE_TRUE2["return true (done)"]
-    ORDER -->|"InPosition + !manages_exit"| CLEAR["clear_position() → return true (done)"]
-    ORDER -->|"InPosition + manages_exit"| LOG
-
-    LOG["④ PERIODIC STATUS LOG
-    (every log_interval_secs)"] --> KEEP["return false (keep ticking)"]
+    KS -->|NO| ENTRY["② strategy.create_order(ctx)"]
+    ENTRY -->|None| DONE["return None"]
+    ENTRY -->|"Some((direction, intent))"| ORDER["③ try_order()
+    validate min size
+    sign + submit"]
+    ORDER -->|success| TRADE["return Some(Trade)"]
+    ORDER -->|failure| DONE
 ```
 
 Key behavioral notes:
-- Exit checks run **before** killswitch — positions can be closed even during exchange divergence
-- Killswitch only blocks **new entries**, not exits
-- `entry_failed = true` is a terminal state for the current market — engine won't retry
-- Entry-only strategies (manages_exit = false) complete immediately after buy
+- Killswitch blocks order placement when exchanges diverge
+- The engine is stateless — the strategy decides whether to place an order each tick
 
 ## Strategy Trait
 
@@ -141,8 +126,8 @@ trait Strategy {
 
 **OrderParams**: `Limit { price, size }` or `Market { amount, price, order_type }`.
 
-The engine handles all infrastructure: state machine, order signing,
-killswitch, logging, and Telegram alerts. The strategy only decides
+The engine handles all infrastructure: order signing,
+killswitch, and Telegram alerts. The strategy only decides
 *when* to trade and *what order* to place.
 
 ## Bono Strategy
@@ -157,29 +142,13 @@ Entry-only strategy (`manages_exit = false`):
 
 Config: `delay_secs`, `budget` (budget currently unused in entry logic, hardcoded $1.00 amount).
 
-## State Machine
-
-```mermaid
-stateDiagram-v2
-    Idle --> InPosition : create_order returns order
-    InPosition --> Idle : create_exit_order returns order\nOR entry_failed = true
-```
-
-- **Idle** — No position. Engine calls `create_order` on the current market.
-- **InPosition** — Holding shares. Engine calls `create_exit_order` each tick (if manages_exit).
-
 ## Order Execution
 
 ### try_order (engine)
 
-- **Live mode**: Signs order via Polymarket SDK → submits to CLOB. On success → InPosition. On failure → `entry_failed = true`.
-- **Sim mode**: Immediately sets InPosition with the order's price/size. No on-chain interaction.
+- **Live mode**: Signs order via Polymarket SDK → submits to CLOB. On failure → returns None.
+- **Paper mode**: Simulates a fill using best ask price. No on-chain interaction.
 - Sends Telegram alert on successful entry.
-
-### execute_sell (engine)
-
-- **Live mode**: Signs order → submits. On success → Idle + PnL logged. On failure → stays InPosition.
-- **Sim mode**: Calculates PnL from entry price, resets to Idle.
 
 ### Pre-submission validation (engine)
 

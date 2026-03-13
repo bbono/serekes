@@ -7,8 +7,11 @@ use polymarket_client_sdk::gamma;
 use polymarket_client_sdk::types::U256;
 use std::collections::VecDeque;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static POLYMARKET_TIME_OFFSET_MS: AtomicI64 = AtomicI64::new(i64::MIN);
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use types::Market;
@@ -27,11 +30,16 @@ fn backoff_secs(attempt: u32) -> u64 {
     (5u64 << attempt.min(4)).min(60)
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
+    let offset = POLYMARKET_TIME_OFFSET_MS.load(Ordering::Relaxed);
+    if offset == i64::MIN {
+        panic!("now_ms() called before Polymarket time offset was fetched");
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
+        + offset
 }
 
 fn push_history(history: &Mutex<VecDeque<(f64, i64)>>, price: f64, ts: i64, window_ms: i64) {
@@ -86,17 +94,18 @@ fn spawn_binance_ws(
                     while let Some(Ok(msg)) = read.next().await {
                         match msg {
                             Message::Text(text) => {
-                                let price = parse_json(&text)
-                                    .and_then(|j| {
-                                        let ts = j["T"].as_i64().unwrap_or_else(now_ms);
-                                        j["p"].as_str()?.parse::<f64>().ok().map(|p| (p, ts))
-                                    });
+                                let price = parse_json(&text).and_then(|j| {
+                                    let ts = j["T"].as_i64().unwrap_or_else(now_ms);
+                                    j["p"].as_str()?.parse::<f64>().ok().map(|p| (p, ts))
+                                });
                                 if let Some((price, ts)) = price {
                                     let _ = tx.send((price, ts));
                                     push_history(&history, price, ts, window_ms);
                                 }
                             }
-                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Ping(data) => {
+                                let _ = write.send(Message::Pong(data)).await;
+                            }
                             Message::Close(_) => break,
                             _ => {}
                         }
@@ -137,7 +146,9 @@ fn spawn_coinbase_ws(product: String, tx: watch::Sender<(f64, i64)>) {
                                     let _ = tx.send((price, now_ms()));
                                 }
                             }
-                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Ping(data) => {
+                                let _ = write.send(Message::Pong(data)).await;
+                            }
                             Message::Close(_) => break,
                             _ => {}
                         }
@@ -193,7 +204,9 @@ fn spawn_deribit_dvol_ws(
                                     push_history(&history, val, ts, window_ms);
                                 }
                             }
-                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Ping(data) => {
+                                let _ = write.send(Message::Pong(data)).await;
+                            }
                             Message::Close(_) => break,
                             _ => {}
                         }
@@ -246,7 +259,9 @@ fn spawn_chainlink_ws(
                                     push_history(&history, price, ts, window_ms);
                                 }
                             }
-                            Message::Ping(data) => { let _ = write.send(Message::Pong(data)).await; }
+                            Message::Ping(data) => {
+                                let _ = write.send(Message::Pong(data)).await;
+                            }
                             Message::Close(_) => break,
                             _ => {}
                         }
@@ -334,14 +349,23 @@ fn spawn_poly_price_ws(
 // Time sync
 // ---------------------------------------------------------------------------
 
-async fn sync_time_offset_ms() -> i64 {
+async fn fetch_time_offset_ms() -> i64 {
     let clob = ClobClient::new("https://clob.polymarket.com", ClobConfig::default()).unwrap();
+    let local_ms = || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    };
     match clob.server_time().await {
         Ok(server_ts) => {
-            let offset_ms: i64 = (server_ts * 1000) - now_ms();
+            let offset_ms: i64 = (server_ts * 1000) - local_ms();
+            POLYMARKET_TIME_OFFSET_MS.store(offset_ms, Ordering::Relaxed);
             info!(
                 "Time sync: server={}s local={}ms offset={}ms",
-                server_ts, now_ms(), offset_ms
+                server_ts,
+                local_ms(),
+                offset_ms
             );
             if offset_ms.abs() > 300_000 {
                 warn!(
@@ -383,7 +407,10 @@ async fn fetch_active_market(
     for started_at_ms in [bucket_start_ms, bucket_start_ms + interval_ms] {
         let ts_secs = started_at_ms / 1000;
         let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts_secs);
-        info!("Discovering active {} {}m market...", asset_upper, interval_minutes);
+        info!(
+            "Discovering active {} {}m market...",
+            asset_upper, interval_minutes
+        );
 
         let request = gamma::types::request::EventBySlugRequest::builder()
             .slug(&slug)
@@ -425,10 +452,22 @@ async fn fetch_active_market(
             "Found {} {}m market {} (tick_size={} min_order_size={})",
             asset_upper, interval_minutes, slug, tick_size, min_order_size
         );
-        return Ok(Market::new(slug, up_token, down_token, started_at_ms, expires_at_ms, tick_size, min_order_size));
+        return Ok(Market::new(
+            slug,
+            up_token,
+            down_token,
+            started_at_ms,
+            expires_at_ms,
+            tick_size,
+            min_order_size,
+        ));
     }
 
-    Err(format!("<- No active {} {}m market found", asset_upper, interval_minutes).into())
+    Err(format!(
+        "<- No active {} {}m market found",
+        asset_upper, interval_minutes
+    )
+    .into())
 }
 
 fn extract_up_down_tokens(outcomes: &[String], tokens: &[String]) -> (String, String) {
@@ -456,7 +495,13 @@ fn lookup_strike(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, started_ms: i64, ex
     let hist = history.lock().unwrap_or_else(|e| e.into_inner());
     hist.iter()
         .rev()
-        .find(|(_, ts)| if exact { *ts == started_ms } else { *ts <= started_ms })
+        .find(|(_, ts)| {
+            if exact {
+                *ts == started_ms
+            } else {
+                *ts <= started_ms
+            }
+        })
         .map(|(price, _)| *price)
         .unwrap_or(0.0)
 }
@@ -487,9 +532,10 @@ async fn wait_for_feeds<S: crate::types::Strategy>(engine: &StrategyEngine<S>) {
 #[tokio::main]
 async fn main() {
     let config = AppConfig::load("config.toml");
+    let bot_name = config.name.clone();
     env_logger::Builder::new()
         .parse_filters(&config.log_level)
-        .format(|buf, record| {
+        .format(move |buf, record| {
             use std::io::Write;
             let module = record.file().unwrap_or("unknown");
             let module = module
@@ -502,28 +548,46 @@ async fn main() {
             let level = record.level();
             let mut level_style = buf.style();
             match level {
-                log::Level::Error => { level_style.set_color(Color::Red).set_bold(true); }
-                log::Level::Warn  => { level_style.set_color(Color::Yellow).set_bold(true); }
-                log::Level::Info  => { level_style.set_color(Color::Green); }
-                log::Level::Debug => { level_style.set_color(Color::Cyan); }
-                log::Level::Trace => { level_style.set_color(Color::Magenta); }
+                log::Level::Error => {
+                    level_style.set_color(Color::Red).set_bold(true);
+                }
+                log::Level::Warn => {
+                    level_style.set_color(Color::Yellow).set_bold(true);
+                }
+                log::Level::Info => {
+                    level_style.set_color(Color::Green);
+                }
+                log::Level::Debug => {
+                    level_style.set_color(Color::Cyan);
+                }
+                log::Level::Trace => {
+                    level_style.set_color(Color::Magenta);
+                }
             };
             writeln!(
                 buf,
-                "[{} {} {}] {}",
+                "{} {}::{} {} {}",
                 buf.timestamp(),
-                level_style.value(format_args!("{:5}", level)),
+                bot_name,
                 module,
-                record.args()
+                level_style.value(format_args!("{:5}", level)),
+                level_style.value(record.args())
             )
         })
         .init();
+
+    // --- Time synchronization (before anything that uses now_ms) ---
+    fetch_time_offset_ms().await;
 
     let market_asset = config.market.asset.to_lowercase();
     let private_key = load_private_key(&config.wallet.key_file);
     let paper_mode = private_key.is_none();
     let mode = if paper_mode { "paper" } else { "live" };
-    info!("Starting Serekeš [{}] | mode={}", market_asset.to_uppercase(), mode);
+    info!(
+        "Starting Serekeš [{}] | mode={}",
+        market_asset.to_uppercase(),
+        mode
+    );
 
     // --- Data broadcast channels ---
     let (binance_tx, binance_rx) = watch::channel((0.0f64, 0i64));
@@ -538,13 +602,19 @@ async fn main() {
         market_asset
     );
     let market_window_secs = (config.market.interval_minutes * 60) as i64;
-    let binance_history_ms = config.engine.binance_history_secs
+    let binance_history_ms = config
+        .engine
+        .binance_history_secs
         .map(|s| s as i64 * 1000)
         .unwrap_or(market_window_secs * 1000);
-    let chainlink_history_ms = config.engine.chainlink_history_secs
+    let chainlink_history_ms = config
+        .engine
+        .chainlink_history_secs
         .map(|s| s as i64 * 1000)
         .unwrap_or(market_window_secs * 1000);
-    let dvol_history_ms = config.engine.dvol_history_secs
+    let dvol_history_ms = config
+        .engine
+        .dvol_history_secs
         .map(|s| s as i64 * 1000)
         .unwrap_or(market_window_secs * 1000);
 
@@ -573,15 +643,11 @@ async fn main() {
         chainlink_history_ms,
     );
 
-    // --- Time synchronization ---
-    let time_offset_ms = sync_time_offset_ms().await;
-
     // --- Strategy engine ---
     let strategy = BonoStrategy::new();
     let mut engine = StrategyEngine::new(
         strategy,
         paper_mode,
-        time_offset_ms,
         config.engine.clone(),
         binance_rx,
         coinbase_rx,
@@ -646,8 +712,7 @@ async fn run_bot_loop<S: crate::types::Strategy>(
                 );
             }
             None => {
-                let wait_ms =
-                    market.expires_at_ms.saturating_sub(now_ms()).max(1000) as u64;
+                let wait_ms = market.expires_at_ms.saturating_sub(now_ms()).max(1000) as u64;
                 warn!("<- No strike price for market {}. Skipping.", market.slug);
                 sleep(Duration::from_millis(wait_ms)).await;
                 continue;
@@ -706,7 +771,10 @@ async fn connect_poly_price_ws(
         U256::from_str(&market.up.token_id).expect("invalid up token_id"),
         U256::from_str(&market.down.token_id).expect("invalid down token_id"),
     ];
-    info!("Connecting to Polymarket Price WS for market {}...", market.slug);
+    info!(
+        "Connecting to Polymarket Price WS for market {}...",
+        market.slug
+    );
     *shared_market.lock().unwrap_or_else(|e| e.into_inner()) = Some(market.clone());
     let connected = Arc::new(tokio::sync::Notify::new());
     let handle = spawn_poly_price_ws(shared_market.clone(), token_ids, connected.clone());
@@ -723,10 +791,14 @@ async fn run_market_ticks<S: crate::types::Strategy>(
         if now_ms() > market.expires_at_ms + 1000 {
             break;
         }
-        if let Some(trade) = engine.execute_tick().await {
-            info!("Trade: {:?}", trade);
-        }
+
+        engine.execute_tick().await;
+
         tokio::task::yield_now().await;
     }
+
+    // Clear the engine state
+    engine.clear_state();
+    
     info!("<-- Exiting market {}.", market.slug);
 }

@@ -1,28 +1,67 @@
-# Log level: "error", "warn", "info", "debug", "trace" (default: "info")
+# ─── Bot Identity ─────────────────────────────────────────────────────────────
+
+# Unique name for this bot instance. Used in logs and alerts to identify
+# which bot produced the output. Required — bot will not start without it.
+# No default.
+name = "serekes-1"
+
+# Log level filter using env_logger syntax. A single global level, or
+# comma-separated with per-module overrides.
+# Levels: "error", "warn", "info", "debug", "trace"
+# Modules: serekes::bot, serekes::engine, serekes::strategies::bono
+# Examples:
+#   "info"                                  — everything at info
+#   "warn,serekes::engine=debug"            — engine at debug, rest at warn
+#   "info,serekes::bot=warn"                — bot quieter, rest at info
+# Default: "info"
 log_level = "info"
 
+# ─── Wallet ───────────────────────────────────────────────────────────────────
+
 [wallet]
-# Path to file containing the Polygon wallet private key (default: ".key")
-# If the key file exists and contains a valid key, bot runs in LIVE mode
-# If the key file is missing or empty, bot runs in PAPER mode
+# Path to a file containing the Polygon wallet private key (hex string).
+# If the file exists and contains a valid key → bot runs in LIVE mode (real orders).
+# If the file is missing or empty → bot runs in PAPER mode (simulated fills).
+# Default: ".key"
 key_file = ".key"
 
+# ─── Market ───────────────────────────────────────────────────────────────────
+
 [market]
-# Asset to trade (used for Polymarket slug and Binance/Coinbase price feeds)
-# Supported: "btc", "eth", "sol", "xrp" (default: "btc")
+# Which asset's Up/Down prediction markets to trade on Polymarket.
+# Also determines the Binance and Coinbase price feed symbols
+# (e.g. "btc" → BTCUSDT on Binance, BTC-USD on Coinbase).
+# Supported: "btc", "eth", "sol", "xrp"
+# Default: "btc"
 asset = "btc"
-# Candle interval in minutes. Supported values: 5 (5m), 15 (15m)
-# Determines which Polymarket up/down market to discover and the Binance kline interval (default: 5)
+
+# Candle interval in minutes. Determines which Polymarket Up/Down market
+# the bot discovers (e.g. btc-updown-5m-*) and the Binance kline interval
+# used to fetch the strike price.
+# Supported: 5, 15
+# Default: 5
 interval_minutes = 5
 
+# ─── Engine ───────────────────────────────────────────────────────────────────
+
 [engine]
-# Max allowed absolute price divergence ($) between Coinbase and Binance before triggering killswitch
-# If exceeded, all trading activity is halted (default: 50.0)
+# Killswitch: maximum allowed absolute price difference ($) between Binance
+# and Coinbase spot prices. If exceeded (and both prices > 0), all order
+# placement is blocked until prices converge. Protects against feed outages
+# or flash crashes on a single exchange.
+# Default: 50.0
 exchange_price_divergence_threshold = 50.0
-# Minimum seconds between engine log outputs, supports decimals (default: 0.5)
-log_interval_secs = 1
-# Price history retention in seconds. Evicts entries older than the window.
-# All default to market window (interval_minutes * 60) when not set.
+
+# Minimum seconds between repeated log messages from the engine (e.g.
+# killswitch warnings). Supports decimals. Lower values give more verbose
+# output; higher values reduce log noise.
+# Default: 0.5
+log_interval_secs = 1.0
+
+# Price history buffer sizes in seconds. The engine keeps a rolling window
+# of recent prices for each feed. Entries older than the window are evicted.
+# Strategies can access these histories via TickContext for lookback analysis.
+# When not set, each defaults to the market window (interval_minutes * 60).
 # binance_history_secs = 300
 # chainlink_history_secs = 300
 # dvol_history_secs = 300

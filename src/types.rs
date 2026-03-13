@@ -8,12 +8,6 @@ use polymarket_client_sdk::types::Decimal;
 // Engine types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EngineState {
-    Idle,
-    InPosition,
-}
-
 pub trait Strategy {
     /// Called each tick when idle. Return Some((direction, intent)) to place an order.
     fn create_order(
@@ -168,7 +162,7 @@ pub struct TickContext {
     pub dvol_ts: i64,
 
     /// Current unix ms, adjusted for Polymarket server time offset.
-    pub now_ms: i64,
+    pub polymarket_now_ms: i64,
 
     /// Polymarket binary market snapshot (static metadata + live bid/ask from poly WS).
     /// None if no market has been discovered yet.
@@ -184,13 +178,16 @@ pub struct TickContext {
 
     /// Recent DVOL history: (volatility, timestamp_ms), oldest first.
     pub dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+
+    /// All trades placed by the engine during this market, oldest first.
+    pub trades: Vec<Trade>,
 }
 
 // ---------------------------------------------------------------------------
 // Trade result
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Trade {
     pub direction: TokenDirection,

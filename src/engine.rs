@@ -1,7 +1,9 @@
 use crate::config::EngineConfig;
-use crate::types::{EngineState, Market, OrderIntent, Strategy, TickContext, TokenDirection, Trade};
-use log::{error, info, warn};
+use crate::types::{
+    Market, OrderIntent, Strategy, TickContext, TokenDirection, Trade,
+};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
+use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer as _};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
@@ -12,21 +14,19 @@ use polymarket_client_sdk::POLYGON;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 pub struct StrategyEngine<S: Strategy> {
     pub strategy: S,
     pub paper_mode: bool,
-    pub time_offset_ms: i64,
     pub engine_config: EngineConfig,
 
     // Auth / SDK
     client: Option<ClobClient<Authenticated<Normal>>>,
     signer_instance: Option<PrivateKeySigner>,
 
-    // State machine
-    state: EngineState,
+    // Trade history for current market
+    trades: Vec<Trade>,
 
     // Loop counters
     last_log_ts: i64,
@@ -50,7 +50,6 @@ impl<S: Strategy> StrategyEngine<S> {
     pub fn new(
         strategy: S,
         paper_mode: bool,
-        time_offset_ms: i64,
         engine_config: EngineConfig,
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
@@ -64,11 +63,10 @@ impl<S: Strategy> StrategyEngine<S> {
         Self {
             strategy,
             paper_mode,
-            time_offset_ms,
             engine_config,
             client: None,
             signer_instance: None,
-            state: EngineState::Idle,
+            trades: Vec::new(),
             last_log_ts: 0,
             binance_rx,
             coinbase_rx,
@@ -79,6 +77,29 @@ impl<S: Strategy> StrategyEngine<S> {
             chainlink_history,
             dvol_history,
         }
+    }
+
+    /// Resets per-market state. Call between market rotations.
+    pub fn clear_state(&mut self) {
+        self.trades.clear();
+        self.last_log_ts = 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Tick — the main entry point
+    // -----------------------------------------------------------------------
+
+    /// Returns Some(Trade) when the strategy places an order.
+    pub async fn execute_tick(&mut self) -> Option<Trade> {
+        let ctx = self.snapshot();
+
+        // 1. Killswitch — block new entries if exchanges diverge
+        if self.check_killswitch(&ctx) {
+            return None;
+        }
+
+        // 2. Try to place an order
+        self.try_order(&ctx).await
     }
 
     pub async fn initialize_client(&mut self, private_key: &str) -> bool {
@@ -107,35 +128,6 @@ impl<S: Strategy> StrategyEngine<S> {
     }
 
     // -----------------------------------------------------------------------
-    // Tick — the main entry point
-    // -----------------------------------------------------------------------
-
-    /// Returns Some(Trade) when the strategy places an order.
-    pub async fn execute_tick(&mut self) -> Option<Trade> {
-        let ctx = self.snapshot();
-
-        // 1. Killswitch — block new entries if exchanges diverge
-        if self.check_killswitch(&ctx) {
-            return None;
-        }
-
-        // 2. Try to place an order
-        let trade = if self.state == EngineState::Idle {
-            self.try_order(&ctx).await
-        } else {
-            None
-        };
-
-        let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
-        if ctx.now_ms - self.last_log_ts >= log_interval_ms {
-            self.last_log_ts = ctx.now_ms;
-            info!("[{:?}]", self.state);
-        }
-
-        trade
-    }
-
-    // -----------------------------------------------------------------------
     // Tick helpers
     // -----------------------------------------------------------------------
 
@@ -144,11 +136,7 @@ impl<S: Strategy> StrategyEngine<S> {
         let (coinbase_price, coinbase_ts) = *self.coinbase_rx.borrow();
         let (chainlink_price, chainlink_ts) = *self.chainlink_rx.borrow();
         let (dvol, dvol_ts) = *self.dvol_rx.borrow();
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            + self.time_offset_ms;
+        let polymarket_now_ms = crate::now_ms();
         let market = self
             .shared_market
             .lock()
@@ -164,11 +152,12 @@ impl<S: Strategy> StrategyEngine<S> {
             chainlink_ts,
             dvol,
             dvol_ts,
-            now_ms,
+            polymarket_now_ms,
             market,
             binance_history: self.binance_history.clone(),
             chainlink_history: self.chainlink_history.clone(),
             dvol_history: self.dvol_history.clone(),
+            trades: self.trades.clone(),
         }
     }
 
@@ -179,8 +168,8 @@ impl<S: Strategy> StrategyEngine<S> {
             && ctx.binance_price > 0.0
         {
             let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
-            if ctx.now_ms - self.last_log_ts >= log_interval_ms {
-                self.last_log_ts = ctx.now_ms;
+            if ctx.polymarket_now_ms - self.last_log_ts >= log_interval_ms {
+                self.last_log_ts = ctx.polymarket_now_ms;
                 warn!(
                     "Killswitch! Binance=${:.2} Coinbase=${:.2} divergence=${:.2}",
                     ctx.binance_price, ctx.coinbase_price, divergence
@@ -191,10 +180,7 @@ impl<S: Strategy> StrategyEngine<S> {
         false
     }
 
-    async fn try_order(
-        &mut self,
-        ctx: &TickContext,
-    ) -> Option<Trade> {
+    async fn try_order(&mut self, ctx: &TickContext) -> Option<Trade> {
         let market = ctx.market.as_ref()?;
         let (direction, intent) = self.strategy.create_order(ctx)?;
 
@@ -216,52 +202,52 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         // --- Submit or simulate ---
-        let (order_id, order_status, making, taking): (String, OrderStatusType, Decimal, Decimal) = if !self.paper_mode {
-            match self.sign_and_submit(&token_id, &intent).await {
-                Ok(resp) => {
-                    match &resp.status {
-                        OrderStatusType::Matched => {
-                            info!("Order {} matched immediately", resp.order_id);
+        let (order_id, order_status, making, taking): (String, OrderStatusType, Decimal, Decimal) =
+            if !self.paper_mode {
+                match self.sign_and_submit(&token_id, &intent).await {
+                    Ok(resp) => {
+                        match &resp.status {
+                            OrderStatusType::Matched => {
+                                info!("Order {} matched immediately", resp.order_id);
+                            }
+                            OrderStatusType::Delayed => {
+                                warn!("Order {} delayed by matching engine", resp.order_id);
+                            }
+                            OrderStatusType::Unmatched => {
+                                warn!("Order {} unmatched (placement ok, no fill)", resp.order_id);
+                            }
+                            OrderStatusType::Live => {
+                                info!("Order {} resting on book", resp.order_id);
+                            }
+                            _ => {
+                                warn!(
+                                    "Order {} unexpected status: {:?}",
+                                    resp.order_id, resp.status
+                                );
+                            }
                         }
-                        OrderStatusType::Delayed => {
-                            warn!("Order {} delayed by matching engine", resp.order_id);
-                        }
-                        OrderStatusType::Unmatched => {
-                            warn!("Order {} unmatched (placement ok, no fill)", resp.order_id);
-                        }
-                        OrderStatusType::Live => {
-                            info!("Order {} resting on book", resp.order_id);
-                        }
-                        _ => {
-                            warn!("Order {} unexpected status: {:?}", resp.order_id, resp.status);
-                        }
+                        (
+                            resp.order_id,
+                            resp.status,
+                            resp.making_amount,
+                            resp.taking_amount,
+                        )
                     }
-                    (
-                        resp.order_id,
-                        resp.status,
-                        resp.making_amount,
-                        resp.taking_amount,
-                    )
+                    Err(e) => {
+                        error!("Order failed: {}", e);
+                        return None;
+                    }
                 }
-                Err(e) => {
-                    error!("Order failed: {}", e);
-                    return None;
-                }
-            }
-        } else {
-            (
-                "PAPERTRADE-1".to_string(),
-                OrderStatusType::Matched,
-                Decimal::default(),
-                Decimal::default(),
-            )
-        };
+            } else {
+                (
+                    "PAPERTRADE-1".to_string(),
+                    OrderStatusType::Matched,
+                    Decimal::default(),
+                    Decimal::default(),
+                )
+            };
 
-        let timestamp_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-            + self.time_offset_ms;
+        let timestamp_ms = crate::now_ms();
 
         // --- Resolve fill price/size ---
         let (price, size) = if self.paper_mode {
@@ -284,7 +270,9 @@ impl<S: Strategy> StrategyEngine<S> {
                     (p, s)
                 }
             }
-        } else if order_status == OrderStatusType::Matched && matches!(intent, OrderIntent::Market { .. }) {
+        } else if order_status == OrderStatusType::Matched
+            && matches!(intent, OrderIntent::Market { .. })
+        {
             let making_f64: f64 = making.try_into().unwrap_or(0.0);
             let taking_f64: f64 = taking.try_into().unwrap_or(0.0);
             if taking_f64 > 0.0 {
@@ -296,12 +284,7 @@ impl<S: Strategy> StrategyEngine<S> {
             intent.price_and_size()
         };
 
-        // --- Update state ---
-        if order_status == OrderStatusType::Matched {
-            self.state = EngineState::InPosition;
-        }
-
-        Some(Trade {
+        let trade = Trade {
             direction,
             intent,
             price,
@@ -309,7 +292,9 @@ impl<S: Strategy> StrategyEngine<S> {
             order_id,
             order_status,
             timestamp_ms,
-        })
+        };
+        self.trades.push(trade.clone());
+        Some(trade)
     }
 
     // -----------------------------------------------------------------------
@@ -325,23 +310,30 @@ impl<S: Strategy> StrategyEngine<S> {
             return Err("client not initialized".into());
         };
 
-        let token_u256 = U256::from_str(token_id)
-            .map_err(|e| format!("Invalid token_id: {:?}", e))?;
+        let token_u256 =
+            U256::from_str(token_id).map_err(|e| format!("Invalid token_id: {:?}", e))?;
 
         let order = match intent {
-            OrderIntent::Limit { side, price, size, order_type } => {
-                client
-                    .limit_order()
-                    .order_type(order_type.clone())
-                    .token_id(token_u256)
-                    .side(*side)
-                    .price(*price)
-                    .size(*size)
-                    .build()
-                    .await
-                    .map_err(|e| format!("Order build failed: {:?}", e))?
-            }
-            OrderIntent::Market { side, amount, order_type } => {
+            OrderIntent::Limit {
+                side,
+                price,
+                size,
+                order_type,
+            } => client
+                .limit_order()
+                .order_type(order_type.clone())
+                .token_id(token_u256)
+                .side(*side)
+                .price(*price)
+                .size(*size)
+                .build()
+                .await
+                .map_err(|e| format!("Order build failed: {:?}", e))?,
+            OrderIntent::Market {
+                side,
+                amount,
+                order_type,
+            } => {
                 let amt = if *side == polymarket_client_sdk::clob::types::Side::Buy {
                     Amount::usdc(*amount)
                 } else {

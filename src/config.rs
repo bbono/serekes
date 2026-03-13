@@ -3,6 +3,7 @@ use std::fs;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
+    pub name: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default)]
@@ -77,20 +78,70 @@ impl AppConfig {
             .unwrap_or_else(|_| panic!("Failed to read config file: {}", path));
         let config: Self = toml::from_str(&content)
             .unwrap_or_else(|e| panic!("Failed to parse {}: {}", path, e));
-        let valid_assets = ["btc", "eth", "sol", "xrp"];
-        if !valid_assets.contains(&config.market.asset.to_lowercase().as_str()) {
-            panic!(
-                "Invalid asset: {}. Supported assets: btc, eth, sol, xrp",
-                config.market.asset
-            );
-        }
-        let valid_intervals = [5, 15];
-        if !valid_intervals.contains(&config.market.interval_minutes) {
-            panic!(
-                "Invalid interval_minutes: {}. Supported intervals: 5m, 15m",
-                config.market.interval_minutes
-            );
-        }
+        config.validate();
         config
+    }
+
+    fn validate(&self) {
+        // name
+        if self.name.trim().is_empty() {
+            panic!("Config 'name' is required and must not be empty");
+        }
+
+        // log_level: validate each entry in the comma-separated filter string
+        let valid_levels = ["error", "warn", "info", "debug", "trace"];
+        for part in self.log_level.split(',') {
+            let level = part
+                .split('=')
+                .last()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if !valid_levels.contains(&level.as_str()) {
+                panic!(
+                    "Invalid log_level '{}'. Valid levels: error, warn, info, debug, trace",
+                    part.trim()
+                );
+            }
+        }
+
+        // market.asset
+        let valid_assets = ["btc", "eth", "sol", "xrp"];
+        if !valid_assets.contains(&self.market.asset.to_lowercase().as_str()) {
+            panic!(
+                "Invalid asset: '{}'. Supported: btc, eth, sol, xrp",
+                self.market.asset
+            );
+        }
+
+        // market.interval_minutes
+        let valid_intervals = [5, 15];
+        if !valid_intervals.contains(&self.market.interval_minutes) {
+            panic!(
+                "Invalid interval_minutes: {}. Supported: 5, 15",
+                self.market.interval_minutes
+            );
+        }
+
+        // engine.exchange_price_divergence_threshold
+        if self.engine.exchange_price_divergence_threshold <= 0.0 {
+            panic!(
+                "exchange_price_divergence_threshold must be > 0, got {}",
+                self.engine.exchange_price_divergence_threshold
+            );
+        }
+
+        // engine.log_interval_secs
+        if self.engine.log_interval_secs < 0.0 {
+            panic!(
+                "log_interval_secs must be >= 0, got {}",
+                self.engine.log_interval_secs
+            );
+        }
+
+        // wallet.key_file
+        if self.wallet.key_file.trim().is_empty() {
+            panic!("wallet.key_file must not be empty");
+        }
     }
 }
