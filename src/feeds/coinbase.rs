@@ -7,7 +7,8 @@ use url::Url;
 
 use super::{backoff_secs, parse_json};
 
-pub fn spawn_coinbase_ws(product: String, tx: watch::Sender<(f64, i64)>) {
+pub fn spawn_coinbase_ws(asset: &str, tx: watch::Sender<(f64, i64)>) {
+    let product = format!("{}-USD", asset.to_uppercase());
     tokio::spawn(async move {
         let mut attempts = 0u32;
         loop {

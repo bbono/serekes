@@ -74,6 +74,26 @@ impl Default for FeedsConfig {
     }
 }
 
+impl FeedsConfig {
+    pub fn binance_history_ms(&self, default_secs: i64) -> i64 {
+        self.binance_history_secs
+            .map(|s| s as i64 * 1000)
+            .unwrap_or(default_secs * 1000)
+    }
+
+    pub fn chainlink_history_ms(&self, default_secs: i64) -> i64 {
+        self.chainlink_history_secs
+            .map(|s| s as i64 * 1000)
+            .unwrap_or(default_secs * 1000)
+    }
+
+    pub fn dvol_history_ms(&self, default_secs: i64) -> i64 {
+        self.dvol_history_secs
+            .map(|s| s as i64 * 1000)
+            .unwrap_or(default_secs * 1000)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct EngineConfig {
     pub strategy: String,

@@ -10,11 +10,15 @@ use url::Url;
 use super::{backoff_secs, parse_json, push_history};
 
 pub fn spawn_binance_ws(
-    url: String,
+    asset: &str,
     tx: watch::Sender<(f64, i64)>,
     history: Arc<Mutex<VecDeque<(f64, i64)>>>,
     window_ms: i64,
 ) {
+    let url = format!(
+        "wss://stream.binance.com:9443/ws/{}usdt@aggTrade",
+        asset
+    );
     tokio::spawn(async move {
         let mut attempts = 0u32;
         loop {
