@@ -145,6 +145,7 @@ async fn run_bot_loop(
     wait_for_feeds(engine).await;
 
     loop {
+        info!("------------- Entering market ------------- ");
         let mut market = discover_market(asset, interval_minutes).await;
 
         if resolve_strike_price {
@@ -162,7 +163,7 @@ async fn run_bot_loop(
                         .expires_at_ms
                         .saturating_sub(common::time::now_ms())
                         .max(1000) as u64;
-                    warn!("<- No strike price for market {}. Skipping.", market.slug);
+                    warn!("No strike price for market {}. Skipping.", market.slug);
                     sleep(Duration::from_millis(wait_ms)).await;
                     continue;
                 }
@@ -170,10 +171,19 @@ async fn run_bot_loop(
         }
 
         let price_handle = connect_poly_price_ws(shared_market, &market).await;
-        let completed = run_market_ticks(engine, &market).await;
+        trade_market(engine, &market).await;
+        engine.clear_state();
         price_handle.abort();
-        if completed {
-            break;
+
+        // Wait for another market
+        let remaining_ms = market.expires_at_ms.saturating_sub(common::time::now_ms());
+        if remaining_ms > 0 {
+            info!(
+                "Engine completed. Waiting {:.1}s for market {} to end...",
+                remaining_ms as f64 / 1000.0,
+                market.slug
+            );
+            sleep(Duration::from_millis((remaining_ms + 1000) as u64)).await;
         }
     }
 }
@@ -182,30 +192,23 @@ async fn run_bot_loop(
 // Market tick loop
 // ---------------------------------------------------------------------------
 
-async fn run_market_ticks(engine: &mut StrategyEngine, market: &Market) -> bool {
-    info!("--> Entering market {}.", market.slug);
-    let mut completed = false;
+async fn trade_market(engine: &mut StrategyEngine, market: &Market) {
+    info!("--> Trading started. Market {}.", market.slug);
     loop {
         if common::time::now_ms() > market.expires_at_ms + 1000 {
             break;
         }
-
         // Execute engine tick
         let result = engine.execute_tick().await;
 
         // If Engine completed with market processing then exit
         if result.completed {
             info!("Result: {:?}", result);
-            completed = true;
             break;
         }
         tokio::task::yield_now().await;
     }
-
-    engine.clear_state();
-
-    info!("<-- Exiting market {}.", market.slug);
-    completed
+    info!("<-- Trading completed. Market {}.", market.slug);
 }
 
 // ---------------------------------------------------------------------------

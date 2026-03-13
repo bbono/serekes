@@ -19,7 +19,7 @@ truncate_key_file = true
 
 # Starting budget in USDC for this bot instance.
 # Default: 0.00
-initial_budget = 1.00
+initial_budget = 2.00
 
 # ─── Market ───────────────────────────────────────────────────────────────────
 

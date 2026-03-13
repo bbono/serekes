@@ -31,7 +31,7 @@ async fn fetch_active_market(
     interval_minutes: u32,
 ) -> Result<Market, Box<dyn std::error::Error + Send + Sync>> {
     let asset_upper = asset.to_uppercase();
-    info!("-> Fetching active {} market...", asset_upper);
+    info!("Fetching active {} market...", asset_upper);
 
     let interval_ms = (interval_minutes as i64) * 60_000;
     let kline_interval = if interval_minutes >= 60 {

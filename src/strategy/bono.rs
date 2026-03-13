@@ -26,12 +26,12 @@ impl Strategy for BonoStrategy {
             (TokenDirection::Down, down_price)
         };
 
-        if price > 0.30 {
+        if price > 0.85 {
             Some((
                 direction,
                 OrderIntent::Market {
                     side: Side::Buy,
-                    amount: Decimal::new(1, 0), // 0.50 USDC
+                    amount: Decimal::new(1, 0), // 1.00 USDC
                     order_type: OrderType::FOK,
                 },
             ))
