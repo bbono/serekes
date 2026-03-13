@@ -5,10 +5,16 @@
 # No default.
 name = "serekes-1"
 
+# Trading strategy to use. Each strategy implements different logic for
+# deciding when and how to place orders. Required — bot will not start without it.
+# Supported: "bono", "konzerva"
+# No default.
+strategy = "bono"
+
 # Log level filter using env_logger syntax. A single global level, or
 # comma-separated with per-module overrides.
 # Levels: "error", "warn", "info", "debug", "trace"
-# Modules: serekes::bot, serekes::engine, serekes::strategies::bono
+# Modules: serekes::bot, serekes::engine, serekes::strategy::bono
 # Examples:
 #   "info"                                  — everything at info
 #   "warn,serekes::engine=debug"            — engine at debug, rest at warn
@@ -16,9 +22,6 @@ name = "serekes-1"
 # Default: "info"
 log_level = "info"
 
-# ─── Wallet ───────────────────────────────────────────────────────────────────
-
-[wallet]
 # Path to a file containing the Polygon wallet private key (hex string).
 # If the file exists and contains a valid key → bot runs in LIVE mode (real orders).
 # If the file is missing or empty → bot runs in PAPER mode (simulated fills).
@@ -27,7 +30,6 @@ key_file = ".key"
 
 # ─── Market ───────────────────────────────────────────────────────────────────
 
-[market]
 # Which asset's Up/Down prediction markets to trade on Polymarket.
 # Also determines the Binance and Coinbase price feed symbols
 # (e.g. "btc" → BTCUSDT on Binance, BTC-USD on Coinbase).
@@ -44,7 +46,6 @@ interval_minutes = 5
 
 # ─── Engine ───────────────────────────────────────────────────────────────────
 
-[engine]
 # Killswitch: maximum allowed absolute price difference ($) between Binance
 # and Coinbase spot prices. If exceeded (and both prices > 0), all order
 # placement is blocked until prices converge. Protects against feed outages

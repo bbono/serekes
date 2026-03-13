@@ -1,5 +1,4 @@
-mod types;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use log::{debug, error, info, warn};
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
@@ -7,52 +6,25 @@ use polymarket_client_sdk::gamma;
 use polymarket_client_sdk::types::U256;
 use std::collections::VecDeque;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-static POLYMARKET_TIME_OFFSET_MS: AtomicI64 = AtomicI64::new(i64::MIN);
-use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use types::Market;
-use url::Url;
-
-mod config;
-mod engine;
-mod strategies;
-
-use crate::config::AppConfig;
-use crate::engine::StrategyEngine;
-use crate::strategies::BonoStrategy;
 use tokio::sync::watch;
+use tokio::time::{sleep, Duration};
 
-fn backoff_secs(attempt: u32) -> u64 {
-    (5u64 << attempt.min(4)).min(60)
-}
+mod feeds;
 
-pub(crate) fn now_ms() -> i64 {
-    let offset = POLYMARKET_TIME_OFFSET_MS.load(Ordering::Relaxed);
-    if offset == i64::MIN {
-        panic!("now_ms() called before Polymarket time offset was fetched");
+use crate::common::config::AppConfig;
+use crate::common::types::Market;
+use crate::engine::StrategyEngine;
+use crate::strategy::{BonoStrategy, KonzervaStrategy};
+use feeds::{spawn_binance_ws, spawn_chainlink_ws, spawn_coinbase_ws, spawn_deribit_dvol_ws};
+
+fn create_strategy(name: &str) -> Box<dyn crate::common::types::Strategy> {
+    match name {
+        "bono" => Box::new(BonoStrategy::new()),
+        "konzerva" => Box::new(KonzervaStrategy::new()),
+        _ => panic!("Unknown strategy: '{}'. Supported: bono, konzerva", name),
     }
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-        + offset
-}
-
-fn push_history(history: &Mutex<VecDeque<(f64, i64)>>, price: f64, ts: i64, window_ms: i64) {
-    let mut hist = history.lock().unwrap_or_else(|e| e.into_inner());
-    hist.push_back((price, ts));
-    let cutoff = ts - window_ms;
-    while hist.front().is_some_and(|(_, t)| *t < cutoff) {
-        hist.pop_front();
-    }
-}
-
-fn parse_json(text: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(text).ok()
 }
 
 fn load_private_key(path: &str) -> Option<String> {
@@ -71,211 +43,6 @@ fn load_private_key(path: &str) -> Option<String> {
             None
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket feed spawners
-// ---------------------------------------------------------------------------
-
-fn spawn_binance_ws(
-    url: String,
-    tx: watch::Sender<(f64, i64)>,
-    history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    window_ms: i64,
-) {
-    tokio::spawn(async move {
-        let mut attempts = 0u32;
-        loop {
-            match connect_async(Url::parse(&url).unwrap()).await {
-                Ok((ws_stream, _)) => {
-                    attempts = 0;
-                    info!("Connected to Binance WS");
-                    let (mut write, mut read) = ws_stream.split();
-                    while let Some(Ok(msg)) = read.next().await {
-                        match msg {
-                            Message::Text(text) => {
-                                let price = parse_json(&text).and_then(|j| {
-                                    let ts = j["T"].as_i64().unwrap_or_else(now_ms);
-                                    j["p"].as_str()?.parse::<f64>().ok().map(|p| (p, ts))
-                                });
-                                if let Some((price, ts)) = price {
-                                    let _ = tx.send((price, ts));
-                                    push_history(&history, price, ts, window_ms);
-                                }
-                            }
-                            Message::Ping(data) => {
-                                let _ = write.send(Message::Pong(data)).await;
-                            }
-                            Message::Close(_) => break,
-                            _ => {}
-                        }
-                    }
-                }
-                Err(e) => {
-                    let delay = backoff_secs(attempts);
-                    error!("Binance WS error: {}. Reconnecting in {}s...", e, delay);
-                    sleep(Duration::from_secs(delay)).await;
-                    attempts += 1;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_coinbase_ws(product: String, tx: watch::Sender<(f64, i64)>) {
-    tokio::spawn(async move {
-        let mut attempts = 0u32;
-        loop {
-            match connect_async(Url::parse("wss://ws-feed.exchange.coinbase.com").unwrap()).await {
-                Ok((mut ws_stream, _)) => {
-                    attempts = 0;
-                    info!("Connected to Coinbase WS");
-                    let sub = serde_json::json!({
-                        "type": "subscribe",
-                        "product_ids": [product],
-                        "channels": ["ticker"]
-                    });
-                    let _ = ws_stream.send(Message::Text(sub.to_string())).await;
-                    let (mut write, mut read) = ws_stream.split();
-                    while let Some(Ok(msg)) = read.next().await {
-                        match msg {
-                            Message::Text(text) => {
-                                let price = parse_json(&text)
-                                    .and_then(|j| j["price"].as_str()?.parse::<f64>().ok());
-                                if let Some(price) = price {
-                                    let _ = tx.send((price, now_ms()));
-                                }
-                            }
-                            Message::Ping(data) => {
-                                let _ = write.send(Message::Pong(data)).await;
-                            }
-                            Message::Close(_) => break,
-                            _ => {}
-                        }
-                    }
-                }
-                Err(e) => {
-                    let delay = backoff_secs(attempts);
-                    error!("Coinbase WS error: {}. Reconnecting in {}s...", e, delay);
-                    sleep(Duration::from_secs(delay)).await;
-                    attempts += 1;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_deribit_dvol_ws(
-    asset: String,
-    tx: watch::Sender<(f64, i64)>,
-    history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    window_ms: i64,
-) {
-    tokio::spawn(async move {
-        let mut attempts = 0u32;
-        loop {
-            match connect_async(Url::parse("wss://www.deribit.com/ws/api/v2").unwrap()).await {
-                Ok((mut ws_stream, _)) => {
-                    attempts = 0;
-                    info!("Connected to Deribit DVOL WS");
-                    let sub = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "method": "public/subscribe",
-                        "id": 1,
-                        "params": {
-                            "channels": [format!("deribit_volatility_index.{}_usd", asset)]
-                        }
-                    });
-                    let _ = ws_stream.send(Message::Text(sub.to_string())).await;
-                    let (mut write, mut read) = ws_stream.split();
-                    while let Some(Ok(msg)) = read.next().await {
-                        match msg {
-                            Message::Text(text) => {
-                                let vol = parse_json(&text).and_then(|j| {
-                                    (j["method"] == "subscription").then(|| {
-                                        let data = &j["params"]["data"];
-                                        let v = data["volatility"].as_f64()?;
-                                        let ts = data["timestamp"].as_i64().unwrap_or_else(now_ms);
-                                        Some((v, ts))
-                                    })?
-                                });
-                                if let Some((val, ts)) = vol {
-                                    let _ = tx.send((val, ts));
-                                    push_history(&history, val, ts, window_ms);
-                                }
-                            }
-                            Message::Ping(data) => {
-                                let _ = write.send(Message::Pong(data)).await;
-                            }
-                            Message::Close(_) => break,
-                            _ => {}
-                        }
-                    }
-                }
-                Err(e) => {
-                    let delay = backoff_secs(attempts);
-                    error!("Deribit WS error: {}. Reconnecting in {}s...", e, delay);
-                    sleep(Duration::from_secs(delay)).await;
-                    attempts += 1;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_chainlink_ws(
-    asset: String,
-    tx: watch::Sender<(f64, i64)>,
-    history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    window_ms: i64,
-) {
-    tokio::spawn(async move {
-        let mut attempts = 0u32;
-        loop {
-            match connect_async(Url::parse("wss://ws-live-data.polymarket.com").unwrap()).await {
-                Ok((mut ws_stream, _)) => {
-                    attempts = 0;
-                    info!("Connected to Chainlink WS");
-                    let sub = serde_json::json!({
-                        "action": "subscribe",
-                        "subscriptions": [{
-                            "topic": "crypto_prices_chainlink",
-                            "type": "update",
-                            "filters": format!("{{\"symbol\":\"{}/usd\"}}", asset)
-                        }]
-                    });
-                    let _ = ws_stream.send(Message::Text(sub.to_string())).await;
-                    let (mut write, mut read) = ws_stream.split();
-                    while let Some(Ok(msg)) = read.next().await {
-                        match msg {
-                            Message::Text(text) => {
-                                let tick = parse_json(&text).and_then(|j| {
-                                    let p = j["payload"]["value"].as_f64()?;
-                                    let ts = j["payload"]["timestamp"].as_i64()?;
-                                    Some((p, ts))
-                                });
-                                if let Some((price, ts)) = tick {
-                                    let _ = tx.send((price, ts));
-                                    push_history(&history, price, ts, window_ms);
-                                }
-                            }
-                            Message::Ping(data) => {
-                                let _ = write.send(Message::Pong(data)).await;
-                            }
-                            Message::Close(_) => break,
-                            _ => {}
-                        }
-                    }
-                }
-                Err(e) => {
-                    let delay = backoff_secs(attempts);
-                    error!("Chainlink WS error: {}. Reconnecting in {}s...", e, delay);
-                    sleep(Duration::from_secs(delay)).await;
-                    attempts += 1;
-                }
-            }
-        }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +127,7 @@ async fn fetch_time_offset_ms() -> i64 {
     match clob.server_time().await {
         Ok(server_ts) => {
             let offset_ms: i64 = (server_ts * 1000) - local_ms();
-            POLYMARKET_TIME_OFFSET_MS.store(offset_ms, Ordering::Relaxed);
+            crate::common::time::store_time_offset(offset_ms);
             info!(
                 "Time sync: server={}s local={}ms offset={}ms",
                 server_ts,
@@ -400,7 +167,7 @@ async fn fetch_active_market(
         format!("{}m", interval_minutes)
     };
 
-    let bucket_start_ms = (now_ms() / interval_ms) * interval_ms;
+    let bucket_start_ms = (crate::common::time::now_ms() / interval_ms) * interval_ms;
 
     let gamma_client = gamma::Client::default();
 
@@ -435,7 +202,7 @@ async fn fetch_active_market(
 
         let expires_at_ms = market.end_date.map(|d| d.timestamp_millis()).unwrap_or(0);
 
-        if up_token.is_empty() || down_token.is_empty() || expires_at_ms <= now_ms() {
+        if up_token.is_empty() || down_token.is_empty() || expires_at_ms <= crate::common::time::now_ms() {
             continue;
         }
 
@@ -510,7 +277,7 @@ fn lookup_strike(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, started_ms: i64, ex
 // Wait for all feeds to have data
 // ---------------------------------------------------------------------------
 
-async fn wait_for_feeds<S: crate::types::Strategy>(engine: &StrategyEngine<S>) {
+async fn wait_for_feeds(engine: &StrategyEngine) {
     info!("Waiting for price feeds...");
     loop {
         let b = engine.binance_rx.borrow().0;
@@ -526,11 +293,10 @@ async fn wait_for_feeds<S: crate::types::Strategy>(engine: &StrategyEngine<S>) {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Entry point
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
+pub async fn run() {
     let config = AppConfig::load("config.toml");
     let bot_name = config.name.clone();
     env_logger::Builder::new()
@@ -576,11 +342,8 @@ async fn main() {
         })
         .init();
 
-    // --- Time synchronization (before anything that uses now_ms) ---
-    fetch_time_offset_ms().await;
-
-    let market_asset = config.market.asset.to_lowercase();
-    let private_key = load_private_key(&config.wallet.key_file);
+    let market_asset = config.asset.to_lowercase();
+    let private_key = load_private_key(&config.key_file);
     let paper_mode = private_key.is_none();
     let mode = if paper_mode { "paper" } else { "live" };
     info!(
@@ -588,6 +351,9 @@ async fn main() {
         market_asset.to_uppercase(),
         mode
     );
+
+    // --- Time synchronization (before anything that uses now_ms) ---
+    fetch_time_offset_ms().await;
 
     // --- Data broadcast channels ---
     let (binance_tx, binance_rx) = watch::channel((0.0f64, 0i64));
@@ -601,19 +367,16 @@ async fn main() {
         "wss://stream.binance.com:9443/ws/{}usdt@aggTrade",
         market_asset
     );
-    let market_window_secs = (config.market.interval_minutes * 60) as i64;
+    let market_window_secs = (config.interval_minutes * 60) as i64;
     let binance_history_ms = config
-        .engine
         .binance_history_secs
         .map(|s| s as i64 * 1000)
         .unwrap_or(market_window_secs * 1000);
     let chainlink_history_ms = config
-        .engine
         .chainlink_history_secs
         .map(|s| s as i64 * 1000)
         .unwrap_or(market_window_secs * 1000);
     let dvol_history_ms = config
-        .engine
         .dvol_history_secs
         .map(|s| s as i64 * 1000)
         .unwrap_or(market_window_secs * 1000);
@@ -644,11 +407,11 @@ async fn main() {
     );
 
     // --- Strategy engine ---
-    let strategy = BonoStrategy::new();
+    let strategy = create_strategy(&config.strategy);
     let mut engine = StrategyEngine::new(
         strategy,
         paper_mode,
-        config.engine.clone(),
+        config.clone(),
         binance_rx,
         coinbase_rx,
         chainlink_rx,
@@ -669,9 +432,9 @@ async fn main() {
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
-    let interval_minutes = config.market.interval_minutes;
+    let interval_minutes = config.interval_minutes;
 
-    tokio::select! {
+    let signal_name = tokio::select! {
         _ = run_bot_loop(
             &mut engine,
             &market_asset,
@@ -679,18 +442,29 @@ async fn main() {
             &shared_market,
             &chainlink_history,
             &binance_history,
-        ) => {},
-        _ = tokio::signal::ctrl_c() => info!("SIGINT received. Shutting down."),
-        _ = sigterm.recv() => info!("SIGTERM received. Shutting down."),
+        ) => None,
+        _ = tokio::signal::ctrl_c() => Some("SIGINT"),
+        _ = sigterm.recv() => Some("SIGTERM"),
+    };
+
+    if let Some(signal) = signal_name {
+        graceful_shutdown(signal).await;
     }
+}
+
+async fn graceful_shutdown(
+    signal: &str
+) {
+    info!("{} received. Shutting down gracefully...", signal);
+    info!("Shutdown complete.");
 }
 
 // ---------------------------------------------------------------------------
 // Bot loop
 // ---------------------------------------------------------------------------
 
-async fn run_bot_loop<S: crate::types::Strategy>(
-    engine: &mut StrategyEngine<S>,
+async fn run_bot_loop(
+    engine: &mut StrategyEngine,
     asset: &str,
     interval_minutes: u32,
     shared_market: &Arc<Mutex<Option<Market>>>,
@@ -712,7 +486,7 @@ async fn run_bot_loop<S: crate::types::Strategy>(
                 );
             }
             None => {
-                let wait_ms = market.expires_at_ms.saturating_sub(now_ms()).max(1000) as u64;
+                let wait_ms = market.expires_at_ms.saturating_sub(crate::common::time::now_ms()).max(1000) as u64;
                 warn!("<- No strike price for market {}. Skipping.", market.slug);
                 sleep(Duration::from_millis(wait_ms)).await;
                 continue;
@@ -756,7 +530,7 @@ async fn resolve_strike_prices(
         if chainlink_strike > 0.0 && binance_strike > 0.0 {
             return Some((chainlink_strike, binance_strike));
         }
-        if now_ms() > deadline_ms {
+        if crate::common::time::now_ms() > deadline_ms {
             return None;
         }
         sleep(Duration::from_millis(100)).await;
@@ -782,13 +556,13 @@ async fn connect_poly_price_ws(
     handle
 }
 
-async fn run_market_ticks<S: crate::types::Strategy>(
-    engine: &mut StrategyEngine<S>,
+async fn run_market_ticks(
+    engine: &mut StrategyEngine,
     market: &Market,
 ) {
     info!("--> Entering market {}.", market.slug);
     loop {
-        if now_ms() > market.expires_at_ms + 1000 {
+        if crate::common::time::now_ms() > market.expires_at_ms + 1000 {
             break;
         }
 
@@ -799,6 +573,6 @@ async fn run_market_ticks<S: crate::types::Strategy>(
 
     // Clear the engine state
     engine.clear_state();
-    
+
     info!("<-- Exiting market {}.", market.slug);
 }

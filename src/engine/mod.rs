@@ -1,5 +1,5 @@
-use crate::config::EngineConfig;
-use crate::types::{
+use crate::common::config::AppConfig;
+use crate::common::types::{
     Market, OrderIntent, Strategy, TickContext, TokenDirection, Trade,
 };
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
@@ -16,10 +16,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
-pub struct StrategyEngine<S: Strategy> {
-    pub strategy: S,
+pub struct StrategyEngine {
+    strategy: Box<dyn Strategy>,
     pub paper_mode: bool,
-    pub engine_config: EngineConfig,
+    pub config: AppConfig,
 
     // Auth / SDK
     client: Option<ClobClient<Authenticated<Normal>>>,
@@ -46,11 +46,11 @@ pub struct StrategyEngine<S: Strategy> {
 // Constructor & auth
 // ---------------------------------------------------------------------------
 
-impl<S: Strategy> StrategyEngine<S> {
+impl StrategyEngine {
     pub fn new(
-        strategy: S,
+        strategy: Box<dyn Strategy>,
         paper_mode: bool,
-        engine_config: EngineConfig,
+        config: AppConfig,
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
         chainlink_rx: watch::Receiver<(f64, i64)>,
@@ -63,7 +63,7 @@ impl<S: Strategy> StrategyEngine<S> {
         Self {
             strategy,
             paper_mode,
-            engine_config,
+            config,
             client: None,
             signer_instance: None,
             trades: Vec::new(),
@@ -136,7 +136,7 @@ impl<S: Strategy> StrategyEngine<S> {
         let (coinbase_price, coinbase_ts) = *self.coinbase_rx.borrow();
         let (chainlink_price, chainlink_ts) = *self.chainlink_rx.borrow();
         let (dvol, dvol_ts) = *self.dvol_rx.borrow();
-        let polymarket_now_ms = crate::now_ms();
+        let polymarket_now_ms = crate::common::time::now_ms();
         let market = self
             .shared_market
             .lock()
@@ -163,11 +163,11 @@ impl<S: Strategy> StrategyEngine<S> {
 
     fn check_killswitch(&mut self, ctx: &TickContext) -> bool {
         let divergence = (ctx.binance_price - ctx.coinbase_price).abs();
-        if divergence > self.engine_config.exchange_price_divergence_threshold
+        if divergence > self.config.exchange_price_divergence_threshold
             && ctx.coinbase_price > 0.0
             && ctx.binance_price > 0.0
         {
-            let log_interval_ms = (self.engine_config.log_interval_secs * 1000.0) as i64;
+            let log_interval_ms = (self.config.log_interval_secs * 1000.0) as i64;
             if ctx.polymarket_now_ms - self.last_log_ts >= log_interval_ms {
                 self.last_log_ts = ctx.polymarket_now_ms;
                 warn!(
@@ -247,8 +247,6 @@ impl<S: Strategy> StrategyEngine<S> {
                 )
             };
 
-        let timestamp_ms = crate::now_ms();
-
         // --- Resolve fill price/size ---
         let (price, size) = if self.paper_mode {
             match &intent {
@@ -291,7 +289,7 @@ impl<S: Strategy> StrategyEngine<S> {
             size,
             order_id,
             order_status,
-            timestamp_ms,
+            timestamp_ms: crate::common::time::now_ms(),
         };
         self.trades.push(trade.clone());
         Some(trade)

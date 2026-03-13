@@ -6,7 +6,7 @@ default-run = "serekes"
 
 [[bin]]
 name = "serekes"
-path = "src/bot.rs"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1.28", features = ["full"] }
