@@ -24,7 +24,7 @@ graph TD
         SE["StrategyEngine<br/>• execute_tick<br/>• snapshot()<br/>• killswitch"]
         SM["State Machine<br/>Idle ↔ InPosition"]
         OE["Order Execution<br/>• sign+submit<br/>• Limit/Market"]
-        TRAIT["Strategy Trait<br/>create_entry_order(ctx, market) → Option&lt;Direction, Order&gt;<br/>create_exit_order(ctx, market, size) → Option&lt;Order&gt;<br/>manages_exit() → bool"]
+        TRAIT["Strategy Trait<br/>create_order(ctx, market) → Option&lt;Direction, Order&gt;<br/>create_exit_order(ctx, market, size) → Option&lt;Order&gt;<br/>manages_exit() → bool"]
         SE --> TRAIT
     end
 
@@ -140,7 +140,7 @@ flowchart LR
     CH --> TC
     MKT --> TC
 
-    TC --> ENTRY["Strategy.create_entry_order()"]
+    TC --> ENTRY["Strategy.create_order()"]
     TC --> EXIT["Strategy.create_exit_order()"]
     ENTRY & EXIT --> OP["OrderParams"]
     OP --> SE["StrategyEngine<br/>sign_and_submit()"]
@@ -149,7 +149,7 @@ flowchart LR
 
 ## Key Design Decisions
 
-1. **Strategy/Engine separation** — Strategies are pure functions of `(TickContext, Market) → Option<Order>`. They never touch I/O, WebSockets, or SDK internals. This makes them trivially testable and interchangeable.
+1. **Strategy/Engine separation** — Strategies are pure functions of `TickContext → Option<Order>`. They never touch I/O, WebSockets, or SDK internals. This makes them trivially testable and interchangeable.
 
 2. **Watch channels for price feeds** — `tokio::sync::watch` provides latest-value semantics, ideal for price feeds where only the most recent value matters. No backpressure concerns.
 

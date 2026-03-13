@@ -93,12 +93,12 @@ flowchart TD
     no prior entry failure?"}
 
     IDLE -->|NO| LOG
-    IDLE -->|YES| ENTRY["strategy.create_entry_order(ctx, market)"]
+    IDLE -->|YES| ENTRY["strategy.create_order(ctx, market)"]
     ENTRY -->|None| LOG
-    ENTRY -->|"Some((direction, order))"| BUY["execute_buy()"]
-    BUY -->|entry_failed| DONE_TRUE2["return true (done)"]
-    BUY -->|"InPosition + !manages_exit"| CLEAR["clear_position() → return true (done)"]
-    BUY -->|"InPosition + manages_exit"| LOG
+    ENTRY -->|"Some((direction, order))"| ORDER["try_order()"]
+    ORDER -->|entry_failed| DONE_TRUE2["return true (done)"]
+    ORDER -->|"InPosition + !manages_exit"| CLEAR["clear_position() → return true (done)"]
+    ORDER -->|"InPosition + manages_exit"| LOG
 
     LOG["④ PERIODIC STATUS LOG
     (every log_interval_secs)"] --> KEEP["return false (keep ticking)"]
@@ -116,8 +116,8 @@ Strategies implement the `Strategy` trait:
 
 ```rust
 trait Strategy {
-    // Called each tick when idle. Return Some((direction, order)) to buy.
-    fn create_entry_order(&self, ctx: &TickContext, market: &Market)
+    // Called each tick when idle. Return Some((direction, order)) to place an order.
+    fn create_order(&self, ctx: &TickContext, market: &Market)
         -> Option<(TokenDirection, OrderParams)>;
 
     // Called each tick while holding a position.
@@ -161,16 +161,16 @@ Config: `delay_secs`, `budget` (budget currently unused in entry logic, hardcode
 
 ```mermaid
 stateDiagram-v2
-    Idle --> InPosition : create_entry_order returns order
+    Idle --> InPosition : create_order returns order
     InPosition --> Idle : create_exit_order returns order\nOR entry_failed = true
 ```
 
-- **Idle** — No position. Engine calls `create_entry_order` on the current market.
+- **Idle** — No position. Engine calls `create_order` on the current market.
 - **InPosition** — Holding shares. Engine calls `create_exit_order` each tick (if manages_exit).
 
 ## Order Execution
 
-### execute_buy (engine)
+### try_order (engine)
 
 - **Live mode**: Signs order via Polymarket SDK → submits to CLOB. On success → InPosition. On failure → `entry_failed = true`.
 - **Sim mode**: Immediately sets InPosition with the order's price/size. No on-chain interaction.
