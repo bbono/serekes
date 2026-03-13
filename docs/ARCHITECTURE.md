@@ -98,6 +98,7 @@ graph LR
 - Position tracking (token ID, direction, entry price, size)
 - Periodic status logging
 - Telegram trade alerts
+- Heartbeat keep-alive (auto-managed by SDK when `heartbeats` feature enabled — prevents cancellation of resting GTC/GTD orders)
 
 ### Business Logic Layer (`strategies/`)
 
@@ -164,7 +165,7 @@ flowchart LR
 
 | Crate | Purpose |
 |-------|---------|
-| `polymarket-client-sdk` | CLOB client, WS price streams, Gamma API, order signing |
+| `polymarket-client-sdk` | CLOB client, WS price streams, Gamma API, order signing, heartbeat |
 | `tokio` | Async runtime, channels, signals |
 | `tokio-tungstenite` | WebSocket connections (Binance, Coinbase, Deribit, Chainlink) |
 | `reqwest` | HTTP client (Binance klines, Telegram) |

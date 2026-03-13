@@ -11,7 +11,7 @@
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
 4. Sync server time offset with Polymarket CLOB
 5. Init Telegram, build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
-6. Authenticate Polymarket SDK (if private key present → live mode)
+6. Authenticate Polymarket SDK (if private key present → live mode). Heartbeat background task auto-starts on auth — keeps resting orders alive for future GTC/GTD strategies.
 7. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
 
 ```mermaid
@@ -195,6 +195,10 @@ Handles both Limit and Market order types:
 - Signs with wallet private key (Polygon chain)
 - Posts to Polymarket CLOB
 - Handles response status: `Matched` (filled), `Delayed` (matching delay), `Unmatched` (no fill), `Live` (resting)
+
+### Heartbeat (SDK auto-managed)
+
+When the `heartbeats` SDK feature is enabled, the SDK automatically starts a background task on authentication that sends periodic heartbeat signals to the CLOB (`POST /heartbeats`). This prevents automatic cancellation of resting orders (GTC/GTD). The current Bono strategy uses FOK orders only, but future strategies using limit orders will benefit from this. The heartbeat interval is configurable via `ClobConfig` (default 5s).
 
 ## Market Discovery
 

@@ -1,13 +1,13 @@
 use crate::config::EngineConfig;
 use crate::types::{EngineState, Market, OrderIntent, Strategy, TickContext, TokenDirection, Trade};
-use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{error, info, warn};
+use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use polymarket_client_sdk::auth::state::Authenticated;
-use polymarket_client_sdk::auth::{Normal, Signer as SDKSigner};
+use polymarket_client_sdk::auth::{Normal, Signer as _};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk::clob::types::{Amount, OrderStatusType, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
-use polymarket_client_sdk::types::Decimal;
+use polymarket_client_sdk::types::{Decimal, U256};
 use polymarket_client_sdk::POLYGON;
 use std::collections::VecDeque;
 use std::str::FromStr;
@@ -216,10 +216,10 @@ impl<S: Strategy> StrategyEngine<S> {
         };
 
         // --- Submit or simulate ---
-        let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
+        let (order_id, success, error_msg, making, taking): (String, bool, Option<String>, Decimal, Decimal) = if !self.paper_mode {
             match self.sign_and_submit(&token_id, &intent).await {
                 Ok(resp) => {
-                    match resp.status {
+                    match &resp.status {
                         OrderStatusType::Matched => {
                             info!("Order {} matched immediately", resp.order_id);
                         }
@@ -296,7 +296,7 @@ impl<S: Strategy> StrategyEngine<S> {
         if success {
             self.state = EngineState::InPosition;
         } else {
-            let msg = error_msg.as_deref().unwrap_or_default();
+            let msg: &str = error_msg.as_deref().unwrap_or_default();
             error!("Order rejected: {}", msg);
         }
 
@@ -324,17 +324,21 @@ impl<S: Strategy> StrategyEngine<S> {
             return Err("client not initialized".into());
         };
 
-        let signable = match intent {
+        let token_u256 = U256::from_str(token_id)
+            .map_err(|e| format!("Invalid token_id: {:?}", e))?;
+
+        let order = match intent {
             OrderIntent::Limit { side, price, size, order_type } => {
                 client
                     .limit_order()
-                    .order_type(*order_type)
-                    .token_id(token_id)
+                    .order_type(order_type.clone())
+                    .token_id(token_u256)
                     .side(*side)
                     .price(*price)
                     .size(*size)
                     .build()
                     .await
+                    .map_err(|e| format!("Order build failed: {:?}", e))?
             }
             OrderIntent::Market { side, amount, order_type } => {
                 let amt = if *side == polymarket_client_sdk::clob::types::Side::Buy {
@@ -346,16 +350,16 @@ impl<S: Strategy> StrategyEngine<S> {
 
                 client
                     .market_order()
-                    .order_type(*order_type)
-                    .token_id(token_id)
+                    .order_type(order_type.clone())
+                    .token_id(token_u256)
                     .side(*side)
                     .amount(amt)
                     .build()
                     .await
+                    .map_err(|e| format!("Order build failed: {:?}", e))?
             }
         };
 
-        let order = signable.map_err(|e| format!("Order build failed: {:?}", e))?;
         let signed_order = client
             .sign(signer, order)
             .await

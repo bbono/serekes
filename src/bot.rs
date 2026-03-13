@@ -1,10 +1,13 @@
 mod types;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
+use polymarket_client_sdk::clob::types::Side;
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::gamma;
+use polymarket_client_sdk::types::U256;
 use std::collections::VecDeque;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, Duration};
@@ -267,7 +270,7 @@ fn spawn_chainlink_ws(
 
 fn spawn_poly_price_ws(
     shared: Arc<Mutex<Option<Market>>>,
-    token_ids: Vec<String>,
+    token_ids: Vec<U256>,
     connected: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -291,35 +294,54 @@ fn spawn_poly_price_ws(
                         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(m) = guard.as_mut() {
                             for entry in &price_change.price_changes {
-                                let bid: f64 = entry
-                                    .best_bid
-                                    .as_ref()
-                                    .map(|v| v.to_string().parse().unwrap_or(0.0))
-                                    .unwrap_or(0.0);
-                                let ask: f64 = entry
-                                    .best_ask
-                                    .as_ref()
-                                    .map(|v| v.to_string().parse().unwrap_or(0.0))
-                                    .unwrap_or(0.0);
-
-                                if bid <= 0.0 || ask <= 0.0 {
+                                let price_f64: f64 = entry.price.to_string().parse().unwrap_or(0.0);
+                                if price_f64 <= 0.0 {
                                     continue;
                                 }
 
-                                let is_up = entry.asset_id == m.up.token_id;
-                                let is_down = entry.asset_id == m.down.token_id;
+                                let asset_str = entry.asset_id.to_string();
+                                let is_up = asset_str == m.up.token_id;
+                                let is_down = asset_str == m.down.token_id;
                                 if !is_up && !is_down {
+                                    continue;
+                                }
+
+                                // Determine which field to update based on side
+                                let (new_bid, new_ask) = if is_up {
+                                    match entry.side {
+                                        Side::Buy => (price_f64, m.up.best_ask),
+                                        _ => (m.up.best_bid, price_f64),
+                                    }
+                                } else {
+                                    match entry.side {
+                                        Side::Buy => (price_f64, m.down.best_ask),
+                                        _ => (m.down.best_bid, price_f64),
+                                    }
+                                };
+
+                                if new_bid <= 0.0 || new_ask <= 0.0 {
+                                    // Only one side known so far, update anyway
+                                    if is_up {
+                                        match entry.side {
+                                            Side::Buy => m.up.best_bid = price_f64,
+                                            _ => m.up.best_ask = price_f64,
+                                        }
+                                    } else {
+                                        match entry.side {
+                                            Side::Buy => m.down.best_bid = price_f64,
+                                            _ => m.down.best_ask = price_f64,
+                                        }
+                                    }
                                     continue;
                                 }
 
                                 // Validate: up mid + down mid should be ~1.0
                                 let (new_up_mid, new_down_mid) = if is_up {
-                                    ((bid + ask) / 2.0, (m.down.best_bid + m.down.best_ask) / 2.0)
+                                    ((new_bid + new_ask) / 2.0, (m.down.best_bid + m.down.best_ask) / 2.0)
                                 } else {
-                                    ((m.up.best_bid + m.up.best_ask) / 2.0, (bid + ask) / 2.0)
+                                    ((m.up.best_bid + m.up.best_ask) / 2.0, (new_bid + new_ask) / 2.0)
                                 };
                                 let sum = new_up_mid + new_down_mid;
-                                // Skip validation if the other side hasn't been set yet
                                 if new_down_mid > 0.0
                                     && new_up_mid > 0.0
                                     && (sum < 0.9 || sum > 1.1)
@@ -328,11 +350,11 @@ fn spawn_poly_price_ws(
                                 }
 
                                 if is_up {
-                                    m.up.best_bid = bid;
-                                    m.up.best_ask = ask;
+                                    m.up.best_bid = new_bid;
+                                    m.up.best_ask = new_ask;
                                 } else {
-                                    m.down.best_bid = bid;
-                                    m.down.best_ask = ask;
+                                    m.down.best_bid = new_bid;
+                                    m.down.best_ask = new_ask;
                                 }
                             }
                         }
@@ -356,7 +378,7 @@ async fn sync_time_offset_ms() -> i64 {
     let clob = ClobClient::new("https://clob.polymarket.com", ClobConfig::default()).unwrap();
     match clob.server_time().await {
         Ok(server_ts) => {
-            let offset_ms = (server_ts * 1000) - now_ms();
+            let offset_ms: i64 = (server_ts * 1000) - now_ms();
             info!(
                 "Time sync: server={}s local={}ms offset={}ms",
                 server_ts, now_ms(), offset_ms
@@ -416,14 +438,13 @@ async fn fetch_active_market(
             None => continue,
         };
 
-        let (tokens_str, outcomes_str) = match (&market.clob_token_ids, &market.outcomes) {
+        let (token_ids, outcomes_list) = match (&market.clob_token_ids, &market.outcomes) {
             (Some(t), Some(o)) => (t, o),
             _ => continue,
         };
 
-        let tokens: Vec<String> = serde_json::from_str(tokens_str)?;
-        let outcomes: Vec<String> = serde_json::from_str(outcomes_str)?;
-        let (up_token, down_token) = extract_up_down_tokens(&outcomes, &tokens);
+        let tokens: Vec<String> = token_ids.iter().map(|id| id.to_string()).collect();
+        let (up_token, down_token) = extract_up_down_tokens(outcomes_list, &tokens);
 
         let expires_at_ms = market.end_date.map(|d| d.timestamp_millis()).unwrap_or(0);
 
@@ -721,7 +742,10 @@ async fn connect_poly_price_ws(
     shared_market: &Arc<Mutex<Option<Market>>>,
     market: &Market,
 ) -> tokio::task::JoinHandle<()> {
-    let token_ids = vec![market.up.token_id.clone(), market.down.token_id.clone()];
+    let token_ids: Vec<U256> = vec![
+        U256::from_str(&market.up.token_id).expect("invalid up token_id"),
+        U256::from_str(&market.down.token_id).expect("invalid down token_id"),
+    ];
     info!("Connecting to Polymarket Price WS for market {}...", market.slug);
     *shared_market.lock().unwrap_or_else(|e| e.into_inner()) = Some(market.clone());
     let connected = Arc::new(tokio::sync::Notify::new());
