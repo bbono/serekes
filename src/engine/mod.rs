@@ -5,13 +5,13 @@ pub use strategies::BonoStrategy;
 pub use traits::Strategy;
 
 use crate::config::EngineConfig;
-use crate::types::{Market, MarketOrderType, OrderParams, Side, TickContext, TokenDirection, Trade};
+use crate::types::{Market, OrderParams, TickContext, TokenDirection, Trade};
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
 use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer as SDKSigner};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
-use polymarket_client_sdk::clob::types::{Amount, OrderType, Side as SdkSide, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::types::Decimal;
 use polymarket_client_sdk::POLYGON;
@@ -221,7 +221,7 @@ impl<S: Strategy> StrategyEngine<S> {
 
         // --- Submit or simulate ---
         let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
-            match self.sign_and_submit(&token_id, &order, SdkSide::Buy).await {
+            match self.sign_and_submit(&token_id, &order, Side::Buy).await {
                 Ok(resp) => (
                     resp.order_id,
                     resp.success,
@@ -300,7 +300,7 @@ impl<S: Strategy> StrategyEngine<S> {
         &self,
         token_id: &str,
         order: &OrderParams,
-        side: SdkSide,
+        side: Side,
     ) -> Result<PostOrderResponse, String> {
         let (Some(ref client), Some(ref signer)) = (&self.client, &self.signer_instance) else {
             return Err("client not initialized".into());
@@ -318,13 +318,9 @@ impl<S: Strategy> StrategyEngine<S> {
                 if price_dec <= Decimal::ZERO || size_dec <= Decimal::ZERO {
                     return Err(format!("Invalid price={} or size={}", price_dec, size_dec));
                 }
-                let sdk_order_type = match order_type {
-                    MarketOrderType::FAK => OrderType::FAK,
-                    MarketOrderType::FOK => OrderType::FOK,
-                };
                 client
                     .limit_order()
-                    .order_type(sdk_order_type)
+                    .order_type(*order_type)
                     .token_id(token_id)
                     .side(side)
                     .price(price_dec)
@@ -338,20 +334,16 @@ impl<S: Strategy> StrategyEngine<S> {
                 if amount_dec <= Decimal::ZERO {
                     return Err(format!("Invalid amount={}", amount_dec));
                 }
-                let amt = if side == SdkSide::Buy {
+                let amt = if side == Side::Buy {
                     Amount::usdc(amount_dec)
                 } else {
                     Amount::shares(amount_dec)
                 }
                 .map_err(|e| format!("Invalid amount: {:?}", e))?;
 
-                let sdk_order_type = match order_type {
-                    MarketOrderType::FAK => OrderType::FAK,
-                    MarketOrderType::FOK => OrderType::FOK,
-                };
                 client
                     .market_order()
-                    .order_type(sdk_order_type)
+                    .order_type(*order_type)
                     .token_id(token_id)
                     .side(side)
                     .amount(amt)

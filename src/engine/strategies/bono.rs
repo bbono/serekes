@@ -1,5 +1,6 @@
 use crate::engine::traits::Strategy;
-use crate::types::{MarketOrderType, OrderParams, TickContext, TokenDirection};
+use crate::types::{OrderParams, TickContext, TokenDirection};
+use polymarket_client_sdk::clob::types::OrderType;
 
 pub struct BonoStrategy;
 
@@ -29,7 +30,7 @@ impl Strategy for BonoStrategy {
                 direction,
                 OrderParams::Market {
                     amount: 0.5,
-                    order_type: MarketOrderType::FOK,
+                    order_type: OrderType::FOK,
                 },
             ))
         } else {

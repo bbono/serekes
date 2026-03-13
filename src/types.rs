@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use polymarket_client_sdk::clob::types::{OrderType, Side};
+
 // ---------------------------------------------------------------------------
 // Market types
 // ---------------------------------------------------------------------------
@@ -58,15 +60,8 @@ impl Market {
 }
 
 // ---------------------------------------------------------------------------
-// Order types
+// Order types (Side and OrderType come from polymarket_client_sdk)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub enum Side {
-    Buy,
-    Sell,
-}
 
 /// Describes how to place an order. The engine signs and submits it
 /// to the Polymarket CLOB via the SDK.
@@ -88,7 +83,7 @@ pub enum OrderParams {
     Limit {
         price: f64,
         size: f64,
-        order_type: MarketOrderType,
+        order_type: OrderType,
     },
 
     /// Market order — placed via `client.market_order()`.
@@ -100,18 +95,8 @@ pub enum OrderParams {
     /// `order_type`: FAK (fill-and-kill, default) or FOK (fill-or-kill).
     Market {
         amount: f64,
-        order_type: MarketOrderType,
+        order_type: OrderType,
     },
-}
-
-/// Fill type for market orders.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
-pub enum MarketOrderType {
-    /// Fill-and-kill: fill as much as possible, cancel the rest.
-    FAK,
-    /// Fill-or-kill: fill entirely or cancel the whole order.
-    FOK,
 }
 
 impl OrderParams {
