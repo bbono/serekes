@@ -1,26 +1,10 @@
 # ─── Bot Identity ─────────────────────────────────────────────────────────────
 
+[bot]
 # Unique name for this bot instance. Used in logs and alerts to identify
 # which bot produced the output. Required — bot will not start without it.
 # No default.
 name = "serekes-1"
-
-# Trading strategy to use. Each strategy implements different logic for
-# deciding when and how to place orders. Required — bot will not start without it.
-# Supported: "bono", "konzerva"
-# No default.
-strategy = "bono"
-
-# Log level filter using env_logger syntax. A single global level, or
-# comma-separated with per-module overrides.
-# Levels: "error", "warn", "info", "debug", "trace"
-# Modules: serekes::bot, serekes::engine, serekes::strategy::bono
-# Examples:
-#   "info"                                  — everything at info
-#   "warn,serekes::engine=debug"            — engine at debug, rest at warn
-#   "info,serekes::bot=warn"                — bot quieter, rest at info
-# Default: "info"
-log_level = "info"
 
 # Path to a file containing the Polygon wallet private key (hex string).
 # If the file exists and contains a valid key → bot runs in LIVE mode (real orders).
@@ -30,6 +14,7 @@ key_file = ".key"
 
 # ─── Market ───────────────────────────────────────────────────────────────────
 
+[market]
 # Which asset's Up/Down prediction markets to trade on Polymarket.
 # Also determines the Binance and Coinbase price feed symbols
 # (e.g. "btc" → BTCUSDT on Binance, BTC-USD on Coinbase).
@@ -44,7 +29,47 @@ asset = "btc"
 # Default: 5
 interval_minutes = 5
 
+# ─── Logger ────────────────────────────────────────────────────────────────────
+
+[logger]
+# Log level filter using env_logger syntax. A single global level, or
+# comma-separated with per-module overrides.
+# Levels: "error", "warn", "info", "debug", "trace"
+# Modules: serekes::bot, serekes::engine, serekes::strategy::bono
+# Examples:
+#   "info"                                  — everything at info
+#   "warn,serekes::engine=debug"            — engine at debug, rest at warn
+#   "info,serekes::bot=warn"                — bot quieter, rest at info
+# Default: "info"
+level = "info"
+
+# Whether to show timestamps in log output.
+# Default: true
+show_timestamp = true
+
+# Whether to show the source module path in log output.
+# Default: true
+show_module = true
+
+# ─── Feeds ─────────────────────────────────────────────────────────────────────
+
+[feeds]
+# Price history buffer sizes in seconds. The bot keeps a rolling window
+# of recent prices for each feed. Entries older than the window are evicted.
+# Strategies can access these histories via TickContext for lookback analysis.
+# When not set, each defaults to the market window (interval_minutes * 60).
+# binance_history_secs = 300
+# chainlink_history_secs = 300
+# dvol_history_secs = 300
+
 # ─── Engine ───────────────────────────────────────────────────────────────────
+
+[engine]
+# Trading strategy to use. Each strategy implements different logic for
+# deciding when and how to place orders. Required — bot will not start without it.
+# Supported: "bono", "konzerva"
+# No default.
+strategy = "bono"
 
 # Killswitch: maximum allowed absolute price difference ($) between Binance
 # and Coinbase spot prices. If exceeded (and both prices > 0), all order
@@ -58,11 +83,3 @@ exchange_price_divergence_threshold = 50.0
 # output; higher values reduce log noise.
 # Default: 0.5
 log_interval_secs = 1.0
-
-# Price history buffer sizes in seconds. The engine keeps a rolling window
-# of recent prices for each feed. Entries older than the window are evicted.
-# Strategies can access these histories via TickContext for lookback analysis.
-# When not set, each defaults to the market window (interval_minutes * 60).
-# binance_history_secs = 300
-# chainlink_history_secs = 300
-# dvol_history_secs = 300

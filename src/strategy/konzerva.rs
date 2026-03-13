@@ -1,4 +1,4 @@
-use crate::common::types::{OrderIntent, Strategy, TickContext, TokenDirection};
+use crate::types::{OrderIntent, Strategy, TickContext, TokenDirection};
 
 pub struct KonzervaStrategy;
 
