@@ -292,6 +292,7 @@ fn spawn_poly_price_ws(
                     Ok(price_change) => {
                         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(m) = guard.as_mut() {
+                            let ts_ms = price_change.timestamp * 1000;
                             for entry in &price_change.price_changes {
                                 let asset_str = entry.asset_id.to_string();
                                 let is_up = asset_str == m.up.token_id;
@@ -314,6 +315,7 @@ fn spawn_poly_price_ws(
                                         side.best_ask = v;
                                     }
                                 }
+                                side.last_updated = ts_ms;
                             }
                         }
                     }
