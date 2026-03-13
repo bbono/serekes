@@ -91,7 +91,9 @@ graph LR
 - State machine (Idle ↔ InPosition)
 - TickContext snapshot construction from all feeds
 - Killswitch: halts entries when Binance/Coinbase prices diverge beyond threshold
-- Order signing and submission via Polymarket SDK
+- Order signing and submission via Polymarket SDK (tick size + neg_risk auto-handled by SDK)
+- Minimum order size validation before submission
+- Order response status handling (Matched/Delayed/Unmatched/Live)
 - Limit and Market order support
 - Position tracking (token ID, direction, entry price, size)
 - Periodic status logging

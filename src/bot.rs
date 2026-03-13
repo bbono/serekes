@@ -431,8 +431,20 @@ async fn fetch_active_market(
             continue;
         }
 
-        info!("Found {} {}m market {}", asset_upper, interval_minutes, slug);
-        return Ok(Market::new(slug, up_token, down_token, started_at_ms, expires_at_ms));
+        let tick_size: f64 = market
+            .order_price_min_tick_size
+            .and_then(|d| d.try_into().ok())
+            .unwrap_or(0.01);
+        let min_order_size: f64 = market
+            .order_min_size
+            .and_then(|d| d.try_into().ok())
+            .unwrap_or(0.0);
+
+        info!(
+            "Found {} {}m market {} (tick_size={} min_order_size={})",
+            asset_upper, interval_minutes, slug, tick_size, min_order_size
+        );
+        return Ok(Market::new(slug, up_token, down_token, started_at_ms, expires_at_ms, tick_size, min_order_size));
     }
 
     Err(format!("<- No active {} {}m market found", asset_upper, interval_minutes).into())

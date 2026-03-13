@@ -5,7 +5,7 @@ use log::{error, info, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer as SDKSigner};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
-use polymarket_client_sdk::clob::types::{Amount, SignatureType};
+use polymarket_client_sdk::clob::types::{Amount, OrderStatusType, SignatureType};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::types::Decimal;
 use polymarket_client_sdk::POLYGON;
@@ -197,6 +197,19 @@ impl<S: Strategy> StrategyEngine<S> {
     ) -> Option<Trade> {
         let market = ctx.market.as_ref()?;
         let (direction, intent) = self.strategy.create_entry_order(ctx)?;
+
+        // --- Validate minimum order size ---
+        if market.min_order_size > 0.0 {
+            let (_, size) = intent.price_and_size();
+            if size < market.min_order_size {
+                warn!(
+                    "Order size {:.4} below minimum {:.4}. Skipping.",
+                    size, market.min_order_size
+                );
+                return None;
+            }
+        }
+
         let token_id = match direction {
             TokenDirection::Up => market.up.token_id.clone(),
             TokenDirection::Down => market.down.token_id.clone(),
@@ -205,13 +218,32 @@ impl<S: Strategy> StrategyEngine<S> {
         // --- Submit or simulate ---
         let (order_id, success, error_msg, making, taking) = if !self.paper_mode {
             match self.sign_and_submit(&token_id, &intent).await {
-                Ok(resp) => (
-                    resp.order_id,
-                    resp.success,
-                    resp.error_msg,
-                    resp.making_amount,
-                    resp.taking_amount,
-                ),
+                Ok(resp) => {
+                    match resp.status {
+                        OrderStatusType::Matched => {
+                            info!("Order {} matched immediately", resp.order_id);
+                        }
+                        OrderStatusType::Delayed => {
+                            warn!("Order {} delayed by matching engine", resp.order_id);
+                        }
+                        OrderStatusType::Unmatched => {
+                            warn!("Order {} unmatched (placement ok, no fill)", resp.order_id);
+                        }
+                        OrderStatusType::Live => {
+                            info!("Order {} resting on book", resp.order_id);
+                        }
+                        _ => {
+                            warn!("Order {} unexpected status: {:?}", resp.order_id, resp.status);
+                        }
+                    }
+                    (
+                        resp.order_id,
+                        resp.success,
+                        resp.error_msg,
+                        resp.making_amount,
+                        resp.taking_amount,
+                    )
+                }
                 Err(e) => {
                     error!("Order failed: {}", e);
                     return None;

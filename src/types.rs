@@ -62,10 +62,14 @@ pub struct Market {
     pub strike_price: f64,
     pub up: TokenSide,
     pub down: TokenSide,
+    /// Minimum tick size for price precision (from Gamma API).
+    pub tick_size: f64,
+    /// Minimum order size in USDC (from Gamma API).
+    pub min_order_size: f64,
 }
 
 impl Market {
-    pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64) -> Self {
+    pub fn new(slug: String, up_token_id: String, down_token_id: String, started_at_ms: i64, expires_at_ms: i64, tick_size: f64, min_order_size: f64) -> Self {
         Self {
             slug,
             started_at_ms,
@@ -74,6 +78,8 @@ impl Market {
             strike_price: 0.0,
             up: TokenSide::new(up_token_id),
             down: TokenSide::new(down_token_id),
+            tick_size,
+            min_order_size,
         }
     }
 }
