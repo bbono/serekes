@@ -1,0 +1,5 @@
+1. Check cpu usage
+top -pid $(pgrep serekes) -stats pid,command,th,cpu -l 3
+
+2. Run in back, log to log
+nohup F > bot.log 2>&

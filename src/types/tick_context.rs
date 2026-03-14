@@ -36,7 +36,8 @@ pub struct TickContext {
 
     /// Polymarket binary market snapshot (static metadata + live bid/ask from poly WS).
     /// None if no market has been discovered yet.
-    pub market: Option<Market>,
+    /// Wrapped in Arc to avoid cloning the full Market struct every tick.
+    pub market: Option<Arc<Market>>,
 
     /// Recent binance price history: (price, timestamp_ms), oldest first.
     /// Lock only when needed — avoid holding across await points.

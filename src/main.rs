@@ -57,7 +57,7 @@ async fn async_main(config: AppConfig) {
     let (coinbase_tx, coinbase_rx) = watch::channel((0.0f64, 0i64));
     let (chainlink_tx, chainlink_rx) = watch::channel((0.0f64, 0i64));
     let (dvol_tx, dvol_rx) = watch::channel((0.0f64, 0i64));
-    let shared_market: Arc<Mutex<Option<Market>>> = Arc::new(Mutex::new(None));
+    let shared_market: Arc<Mutex<Option<Arc<Market>>>> = Arc::new(Mutex::new(None));
 
     // --- Spawn all price feed WebSockets ---
     let market_window_secs = (config.market.interval_minutes * 60) as i64;
@@ -149,7 +149,7 @@ async fn run_bot_loop(
     asset: &str,
     interval_minutes: u32,
     resolve_strike_price: bool,
-    shared_market: &Arc<Mutex<Option<Market>>>,
+    shared_market: &Arc<Mutex<Option<Arc<Market>>>>,
     chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     tick_interval_us: u64,

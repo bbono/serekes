@@ -177,7 +177,7 @@ fn lookup_strike(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, started_ms: i64, ex
 // ---------------------------------------------------------------------------
 
 pub async fn connect_poly_price_ws(
-    shared_market: &Arc<Mutex<Option<Market>>>,
+    shared_market: &Arc<Mutex<Option<Arc<Market>>>>,
     market: &Market,
 ) -> tokio::task::JoinHandle<()> {
     let token_ids: Vec<U256> = vec![
@@ -188,7 +188,7 @@ pub async fn connect_poly_price_ws(
         "Connecting to Polymarket Price WS for market {}...",
         market.slug
     );
-    *shared_market.lock().unwrap_or_else(|e| e.into_inner()) = Some(market.clone());
+    *shared_market.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(market.clone()));
     let connected = Arc::new(tokio::sync::Notify::new());
     let handle = spawn_poly_price_ws(shared_market.clone(), token_ids, connected.clone());
     connected.notified().await;
@@ -196,7 +196,7 @@ pub async fn connect_poly_price_ws(
 }
 
 fn spawn_poly_price_ws(
-    shared: Arc<Mutex<Option<Market>>>,
+    shared: Arc<Mutex<Option<Arc<Market>>>>,
     token_ids: Vec<U256>,
     connected: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
@@ -219,31 +219,40 @@ fn spawn_poly_price_ws(
                 match result {
                     Ok(price_change) => {
                         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(m) = guard.as_mut() {
+                        if let Some(current) = guard.as_ref() {
+                            let mut updated = (**current).clone();
                             let ts_ms = price_change.timestamp * 1000;
+                            let mut changed = false;
                             for entry in &price_change.price_changes {
                                 let asset_str = entry.asset_id.to_string();
-                                let is_up = asset_str == m.up.token_id;
-                                let is_down = asset_str == m.down.token_id;
+                                let is_up = asset_str == updated.up.token_id;
+                                let is_down = asset_str == updated.down.token_id;
                                 if !is_up && !is_down {
                                     continue;
                                 }
 
-                                let side = if is_up { &mut m.up } else { &mut m.down };
+                                let side = if is_up { &mut updated.up } else { &mut updated.down };
 
                                 if let Some(bid) = &entry.best_bid {
                                     let v: f64 = bid.to_string().parse().unwrap_or(0.0);
                                     if v > 0.0 {
                                         side.best_bid = v;
+                                        changed = true;
                                     }
                                 }
                                 if let Some(ask) = &entry.best_ask {
                                     let v: f64 = ask.to_string().parse().unwrap_or(0.0);
                                     if v > 0.0 {
                                         side.best_ask = v;
+                                        changed = true;
                                     }
                                 }
-                                side.last_updated = ts_ms;
+                                if changed {
+                                    side.last_updated = ts_ms;
+                                }
+                            }
+                            if changed {
+                                *guard = Some(Arc::new(updated));
                             }
                         }
                     }
