@@ -1,5 +1,5 @@
 In production
-nohup cargo run --release > bot.log 2>&1 &                                                                                                                                                                                                                                 
+nohup F > bot.log 2>&1 &                                                                                                                                                                                                                                 
                                                                                                                                                                                                                                                                              
   Then you can close the terminal. Check logs with tail -f bot.log.                                                                                                                                                                                                          
                                                             

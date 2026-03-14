@@ -207,7 +207,7 @@ async fn trade_market(engine: &mut StrategyEngine, market: &Market) {
             info!("Result: {:?}", result);
             break;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_micros(100)).await;
     }
     info!("<-- Trading completed. Market {}.", market.slug);
 }
@@ -251,7 +251,7 @@ async fn authenticate_client(
         .unwrap()
         .with_chain_id(Some(POLYGON));
     let client_builder =
-        ClobClient::new("https://clob.polymarket.com", ClobConfig::default()).unwrap();
+        ClobClient::new("https://clob.polymarket.com", ClobConfig::builder().build()).unwrap();
 
     match client_builder
         .authentication_builder(&signer)

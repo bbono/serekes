@@ -23,7 +23,7 @@ pub async fn fetch_time_offset_ms() -> i64 {
     use log::{error, info, warn};
     use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 
-    let clob = ClobClient::new("https://clob.polymarket.com", ClobConfig::default()).unwrap();
+    let clob = ClobClient::new("https://clob.polymarket.com", ClobConfig::builder().build()).unwrap();
     let local_ms = || {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
