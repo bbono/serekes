@@ -17,6 +17,17 @@ key_file = ".key"
 # Default: true
 truncate_key_file = true
 
+# Number of tokio runtime worker threads.
+# More threads help under heavy WebSocket load; fewer threads save CPU.
+# Range: 1–16
+# Default: 2
+worker_threads = 2
+
+# How many times per second the engine trading loop ticks (calls execute_tick).
+# Higher = more responsive but higher CPU. 1000 = once per ms, 20 = once per 50ms.
+# Default: 1000
+engine_ticks_per_second = 100
+
 # Starting budget in USDC for this bot instance.
 # Default: 0.00
 initial_budget = 4.00

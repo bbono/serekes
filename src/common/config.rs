@@ -49,6 +49,17 @@ pub struct BotConfig {
     pub initial_budget: f64,
     #[serde(default = "default_true")]
     pub truncate_key_file: bool,
+    #[serde(default = "default_worker_threads")]
+    pub worker_threads: usize,
+    #[serde(default = "default_engine_ticks_per_second")]
+    pub engine_ticks_per_second: u32,
+}
+
+impl BotConfig {
+    /// Tick interval in microseconds, computed from engine_ticks_per_second.
+    pub fn tick_interval_us(&self) -> u64 {
+        1_000_000 / self.engine_ticks_per_second as u64
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +128,8 @@ fn default_show_timestamp() -> bool { true }
 fn default_show_module() -> bool { true }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
+fn default_worker_threads() -> usize { 2 }
+fn default_engine_ticks_per_second() -> u32 { 1000 }
 
 impl AppConfig {
     pub fn load(path: &str) -> Self {
@@ -185,6 +198,19 @@ impl AppConfig {
             ));
         }
 
+
+        // bot.worker_threads
+        if self.bot.worker_threads == 0 || self.bot.worker_threads > 16 {
+            errors.push(format!(
+                "bot.worker_threads must be between 1 and 16, got {}",
+                self.bot.worker_threads
+            ));
+        }
+
+        // bot.engine_ticks_per_second
+        if self.bot.engine_ticks_per_second == 0 {
+            errors.push("bot.engine_ticks_per_second must be > 0".into());
+        }
 
         // feeds.*_history_secs
         if let Some(0) = self.feeds.binance_history_secs {

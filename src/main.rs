@@ -24,10 +24,20 @@ use feeds::{
 };
 use types::Market;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let config = AppConfig::load("config.toml");
     common::logger::init(&config.bot.name, &config.logger);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.bot.worker_threads)
+        .enable_all()
+        .build()
+        .expect("Failed to build tokio runtime");
+
+    runtime.block_on(async_main(config));
+}
+
+async fn async_main(config: AppConfig) {
 
     let market_asset = config.market.asset.to_lowercase();
     let private_key = load_private_key(&config.bot.key_file, config.bot.truncate_key_file);
@@ -118,6 +128,7 @@ async fn main() {
             &shared_market,
             &chainlink_history,
             &binance_history,
+            config.bot.tick_interval_us(),
         ) => None,
         _ = tokio::signal::ctrl_c() => Some("SIGINT"),
         _ = sigterm.recv() => Some("SIGTERM"),
@@ -141,6 +152,7 @@ async fn run_bot_loop(
     shared_market: &Arc<Mutex<Option<Market>>>,
     chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
+    tick_interval_us: u64,
 ) {
     wait_for_feeds(engine).await;
 
@@ -171,7 +183,7 @@ async fn run_bot_loop(
         }
 
         let price_handle = connect_poly_price_ws(shared_market, &market).await;
-        trade_market(engine, &market).await;
+        trade_market(engine, &market, tick_interval_us).await;
         engine.clear_state();
         price_handle.abort();
         info!("<<<<<<<<<<<<< Exiting market <<<<<<<<<<<<<");
@@ -193,7 +205,7 @@ async fn run_bot_loop(
 // Market tick loop
 // ---------------------------------------------------------------------------
 
-async fn trade_market(engine: &mut StrategyEngine, market: &Market) {
+async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interval_us: u64) {
     info!("--> Trading started. Market {}.", market.slug);
     loop {
         if common::time::now_ms() > market.expires_at_ms + 1000 {
@@ -207,8 +219,7 @@ async fn trade_market(engine: &mut StrategyEngine, market: &Market) {
             info!("Result: {:?}", result);
             break;
         }
-        //tokio::task::yield_now().await; 
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::time::sleep(Duration::from_micros(tick_interval_us)).await;
     }
     info!("<-- Trading completed. Market {}.", market.slug);
 }

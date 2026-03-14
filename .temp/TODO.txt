@@ -1,4 +1,0 @@
-1. Crash recovery
-2. Limit Order
-3. Sell
-4. Private key should not be in config! private_key. delete repo and creat new
