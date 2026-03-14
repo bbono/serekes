@@ -17,10 +17,7 @@ impl StrategyEngine {
             let budget = *self.budget.lock().unwrap_or_else(|e| e.into_inner());
             let cost = intent.cost();
             if cost > budget {
-                warn!(
-                    "Insufficient budget: cost={:.2} budget={:.2}. Skipping.",
-                    cost, budget
-                );
+                warn!("Insufficient budget: cost={:.2} budget={:.2}", cost, budget);
                 return None;
             }
         }
@@ -35,10 +32,7 @@ impl StrategyEngine {
                 OrderIntent::Limit { .. } => market.min_order_size,
             };
             if min_size > 0.0 && size < min_size {
-                warn!(
-                    "Order size {:.4} below minimum {:.4}. Skipping.",
-                    size, min_size
-                );
+                warn!("Order size below minimum: size={:.4} min={:.4}", size, min_size);
                 return None;
             }
         }
@@ -54,35 +48,28 @@ impl StrategyEngine {
                 let time_from_last_failed_order_ms =
                     crate::common::time::now_ms() - self.last_try_order_failed_timestamp_ms;
                 if time_from_last_failed_order_ms <= 3000 {
-                    error!(
-                        "Last order failed {:0}ms from now.",
-                        time_from_last_failed_order_ms
+                    warn!(
+                        "Order cooldown: {:?} {}ms since last failure",
+                        direction, time_from_last_failed_order_ms
                     );
                     return None;
                 }
-                self.last_try_order_failed_timestamp_ms = 0;
                 match self.sign_and_submit(&token_id, &intent).await {
                     Ok(resp) => {
                         match &resp.status {
-                            OrderStatusType::Matched => {
-                                debug!("Order {} matched immediately", resp.order_id);
-                            }
+                            OrderStatusType::Matched => {}
                             OrderStatusType::Delayed => {
-                                warn!("Order {} delayed by matching engine", resp.order_id);
+                                debug!("Order {} delayed: making={} taking={}", resp.order_id, resp.making_amount, resp.taking_amount);
                             }
                             OrderStatusType::Unmatched => {
-                                warn!("Order {} unmatched (placement ok, no fill)", resp.order_id);
+                                debug!("Order {} unmatched: making={} taking={}", resp.order_id, resp.making_amount, resp.taking_amount);
                             }
-                            OrderStatusType::Live => {
-                                debug!("Order {} resting on book", resp.order_id);
-                            }
+                            OrderStatusType::Live => {}
                             _ => {
-                                warn!(
-                                    "Order {} unexpected status: {:?}",
-                                    resp.order_id, resp.status
-                                );
+                                warn!("Unexpected order status: {:?} id={}", resp.status, resp.order_id);
                             }
                         }
+                        self.last_try_order_failed_timestamp_ms = 0;
                         (
                             resp.order_id,
                             resp.status,
@@ -91,7 +78,8 @@ impl StrategyEngine {
                         )
                     }
                     Err(e) => {
-                        error!("Order failed: {}", e);
+                        self.last_try_order_failed_timestamp_ms = crate::common::time::now_ms();
+                        error!("Order submit failed: {:?} {e}", direction);
                         return None;
                     }
                 }

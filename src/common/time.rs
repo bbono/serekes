@@ -41,15 +41,12 @@ pub async fn fetch_time_offset_ms() -> i64 {
                 offset_ms
             );
             if offset_ms.abs() > 300_000 {
-                warn!(
-                    "Large time skew detected! Adjusting timestamps by {}ms",
-                    offset_ms
-                );
+                warn!("Large time skew: offset={offset_ms}ms");
             }
             offset_ms
         }
         Err(e) => {
-            error!("Failed to sync time: {}. Defaulting to 0 offset.", e);
+            error!("Time sync failed: {e} (using local clock)");
             0
         }
     }

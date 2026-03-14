@@ -108,9 +108,16 @@ impl StrategyEngine {
             if cost > 0.0 {
                 let mut budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
                 *budget -= cost;
-                debug!("Trade (Buy) {:?} | budget={:.2}", t, *budget);
+                debug!(
+                    "Buy {:?} price={:.4} size={:.4} status={:?} budget={:.2}",
+                    t.direction, t.price, t.size, t.order_status, *budget
+                );
             } else {
-                debug!("Trade (Sell) {:?}", t);
+                debug!(
+                    "Sell {:?} price={:.4} size={:.4} status={:?} budget={:.2}",
+                    t.direction, t.price, t.size, t.order_status,
+                    *self.budget.lock().unwrap_or_else(|e| e.into_inner())
+                );
             }
             true
         } else {

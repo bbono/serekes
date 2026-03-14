@@ -15,31 +15,31 @@ graph TD
         CL_WS["Chainlink WS<br/>(oracle)"]
         PM_WS["Polymarket<br/>Price WS"]
         SYNC["Time Sync<br/>(CLOB server)"]
-        CHANNELS["tokio::sync::watch channels<br/>Arc&lt;Mutex&lt;VecDeque&gt;&gt; histories<br/>Arc&lt;Mutex&lt;Option&lt;Market&gt;&gt;&gt; shared state"]
+        CHANNELS["tokio::sync::watch channels<br/>Arc&lt;Mutex&lt;VecDeque&gt;&gt; histories<br/>Arc&lt;Mutex&lt;Option&lt;Arc&lt;Market&gt;&gt;&gt;&gt; shared state"]
     end
 
     BIN_WS & CB_WS & DER_WS & CL_WS & PM_WS & SYNC --> CHANNELS
 
     subgraph ENGINE["ENGINE LAYER"]
-        SE["StrategyEngine<br/>• execute_tick<br/>• snapshot()<br/>• killswitch"]
-        OE["Order Execution<br/>• sign+submit<br/>• Limit/Market"]
-        TRAIT["Strategy Trait<br/>create_order(ctx, market) → Option&lt;Direction, Order&gt;<br/>create_exit_order(ctx, market, size) → Option&lt;Order&gt;<br/>manages_exit() → bool"]
+        SE["StrategyEngine<br/>• execute_tick<br/>• snapshot()<br/>• budget tracking"]
+        OE["Order Execution<br/>• sign+submit<br/>• Limit/Market<br/>• cooldown"]
+        TRAIT["Strategy Trait<br/>create_order(ctx) → Option&lt;Direction, OrderIntent&gt;"]
         SE --> TRAIT
     end
 
     CHANNELS --> ENGINE
 
     subgraph BIZ["BUSINESS LOGIC LAYER"]
-        BONO["BonoStrategy<br/>• delay entry<br/>• buy higher ask side<br/>• entry-only"]
-        FUTB["(Future Strategy B)"]
-        FUTC["(Future Strategy C)"]
+        BONO["BonoStrategy<br/>• last-30s entry<br/>• buy higher ask (0.85–0.97)<br/>• FOK market order"]
+        KONZ["KonzervaStrategy<br/>• placeholder (no-op)"]
     end
 
     TRAIT --> BIZ
 
     subgraph SUPPORT["SUPPORT SERVICES"]
-        TG["Telegram Alerts"]
-        MD["Market Discovery<br/>(Gamma API + Binance kline)"]
+        TG["Telegram Bot<br/>(dedicated thread)"]
+        MD["Market Discovery<br/>(Gamma API)"]
+        BUDGET["Budget Manager<br/>Arc&lt;Mutex&lt;f64&gt;&gt;"]
         CFG["Config (TOML)"]
     end
 
@@ -65,9 +65,10 @@ graph LR
     SRC["src/"] --> MAIN["main.rs<br/>Entry point: main(), runtime setup,<br/>bot loop, market rotation"]
     SRC --> COMMON["common/<br/>config.rs, logger.rs, time.rs"]
     SRC --> FEEDS["feeds/<br/>binance.rs, coinbase.rs, deribit.rs,<br/>chainlink.rs, polymarket.rs"]
-    SRC --> ENG["engine/<br/>mod.rs (StrategyEngine, snapshot)<br/>order.rs (sign+submit)"]
+    SRC --> ENG["engine/<br/>mod.rs (StrategyEngine, snapshot)<br/>order.rs (try_order, sign+submit)"]
     SRC --> STRAT["strategy/<br/>mod.rs, bono.rs, konzerva.rs"]
-    SRC --> TYP["types/<br/>Domain types + Strategy trait"]
+    SRC --> TG["telegram/<br/>mod.rs (spawn, outbound/inbound loops)<br/>commands.rs (command routing)"]
+    SRC --> TYP["types/<br/>market.rs, tick_context.rs, order.rs<br/>Domain types + Strategy trait"]
 ```
 
 ## Layer Responsibilities
@@ -77,10 +78,10 @@ graph LR
 - Configurable tokio runtime (`worker_threads` in config)
 - WebSocket lifecycle management (connect, reconnect, backoff)
 - Data feed parsing (Binance aggTrade, Coinbase ticker, Deribit DVOL, Chainlink oracle)
-- Price history buffering (ring buffers via VecDeque)
+- Price history buffering (ring buffers via VecDeque, time-windowed eviction)
 - Data broadcast via `tokio::sync::watch` channels
 - Market discovery via Polymarket Gamma API
-- Binance kline API for strike price
+- Strike price resolution from history buffers (Chainlink exact match + Binance `<=` match)
 - Time synchronization with Polymarket server
 - Configurable tick rate (`engine_ticks_per_second` in config, converted to microsecond sleep interval)
 - Graceful shutdown (SIGINT/SIGTERM)
@@ -88,20 +89,20 @@ graph LR
 ### Engine Layer (`engine/`, types in `types/`)
 
 - TickContext snapshot construction from all feeds
-- Killswitch: halts entries when Binance/Coinbase prices diverge beyond threshold
+- Budget management: shared `Arc<Mutex<f64>>`, deducted on buy, checked before orders
 - Order signing and submission via Polymarket SDK (tick size + neg_risk auto-handled by SDK)
-- Minimum order size validation before submission
+- Minimum order size validation (Market: ≥ 1 USDC, Limit: ≥ `market.min_order_size`)
+- Failed order cooldown (3s after last failure)
 - Order response status handling (Matched/Delayed/Unmatched/Live) — stored in `Trade.order_status`
+- Fill price resolution from CLOB response (`making_amount` / `taking_amount` for matched market orders)
 - Limit and Market order support
-- Periodic status logging
-- Telegram trade alerts
-- Heartbeat keep-alive (auto-managed by SDK when `heartbeats` feature enabled — prevents cancellation of resting GTC/GTD orders)
+- Completion detection (budget < $1.00)
 
 ### Business Logic Layer (`strategy/`)
 
 - Pure trading logic — no I/O, no async, no infrastructure
-- Receives `TickContext` (read-only market snapshot)
-- Returns `Option<OrderParams>` — the engine handles everything else
+- Receives `TickContext` (read-only market snapshot including trade history)
+- Returns `Option<(TokenDirection, OrderIntent)>` — the engine handles everything else
 - Pluggable via the `Strategy` trait
 
 ### Support Services
@@ -109,7 +110,9 @@ graph LR
 - **Config** (`common/config.rs`): TOML deserialization with defaults and validation
 - **Logger** (`common/logger.rs`): Configurable log formatting (timestamp, module path)
 - **Time** (`common/time.rs`): Server-synced `now_ms()` with Polymarket offset
-- **Types** (`types/`): Shared domain types (`Market`, `TickContext`, `TokenDirection`, `Strategy` trait)
+- **Types** (`types/`): Shared domain types (`Market`, `TickContext`, `TokenDirection`, `OrderIntent`, `Trade`, `Strategy` trait)
+- **Telegram** (`telegram/`): Dedicated OS thread with own tokio runtime (one bot token per instance), command routing, outbound message queue with retry, inbound long-polling with owner-only filtering
+- **Budget**: `Arc<Mutex<f64>>` shared between engine and Telegram commands — queryable/settable at runtime
 
 ## Concurrency Model
 
@@ -120,53 +123,57 @@ The bot uses **Tokio** with a configurable multi-threaded runtime:
 - **1 per-market WS task** — spawned for each active market, aborted on market expiry
 - **Main task** — runs the market rotation loop synchronously (discover → tick → cleanup → repeat)
 - **Tick loop** — sleeps `1_000_000 / engine_ticks_per_second` microseconds between ticks. Default 1000 ticks/sec (1ms). Configurable in `[bot]` config.
-- **Communication** — `watch` channels for latest-value feeds, `Arc<Mutex<>>` for shared mutable state
+- **Telegram thread** — dedicated OS thread with single-threaded tokio runtime, fully isolated from the engine runtime. Runs outbound message queue and inbound command polling concurrently.
+- **Communication** — `watch` channels for latest-value feeds, `Arc<Mutex<>>` for shared mutable state (market, budget)
 
 ## Data Flow
 
 ```mermaid
 flowchart LR
     BIN["Binance<br/>aggTrade"] -->|watch::channel| TC["TickContext<br/>(snapshot)"]
-    BIN -->|watch::channel| BH["binance_history<br/>(VecDeque)"]
+    BIN -->|push_history| BH["binance_history<br/>(VecDeque)"]
     CB["Coinbase<br/>ticker"] -->|watch::channel| TC
     DER["Deribit<br/>DVOL"] -->|watch::channel| TC
+    DER -->|push_history| DH["dvol_history<br/>(VecDeque)"]
     CL["Chainlink<br/>oracle"] -->|watch::channel| TC
-    CL -->|watch::channel| CH["chainlink_history<br/>(VecDeque)"]
-    PM["Polymarket<br/>prices"] -->|"Arc&lt;Mutex&lt;Option&lt;Market&gt;&gt;&gt;"| MKT["market.up/down<br/>.best_bid/ask"]
+    CL -->|push_history| CH["chainlink_history<br/>(VecDeque)"]
+    PM["Polymarket<br/>prices"] -->|"Arc&lt;Mutex&lt;Option&lt;Arc&lt;Market&gt;&gt;&gt;&gt;"| MKT["market.up/down<br/>.best_bid/ask"]
 
-    BH --> TC
-    CH --> TC
+    BH & CH & DH --> TC
     MKT --> TC
 
     TC --> ENTRY["Strategy.create_order()"]
-    TC --> EXIT["Strategy.create_exit_order()"]
-    ENTRY & EXIT --> OP["OrderParams"]
-    OP --> SE["StrategyEngine<br/>sign_and_submit()"]
+    ENTRY --> OI["OrderIntent"]
+    OI --> SE["StrategyEngine<br/>budget check → sign_and_submit()"]
     SE --> CLOB["Polymarket CLOB"]
+    SE -->|deduct cost| BUDGET["Shared Budget"]
 ```
 
 ## Key Design Decisions
 
-1. **Strategy/Engine separation** — Strategies are pure functions of `TickContext → Option<Order>`. They never touch I/O, WebSockets, or SDK internals. This makes them trivially testable and interchangeable.
+1. **Strategy/Engine separation** — Strategies are pure functions of `TickContext → Option<(Direction, OrderIntent)>`. They never touch I/O, WebSockets, or SDK internals. This makes them trivially testable and interchangeable.
 
 2. **Watch channels for price feeds** — `tokio::sync::watch` provides latest-value semantics, ideal for price feeds where only the most recent value matters. No backpressure concerns.
 
-3. **Dual strike price** — Both Binance kline open price and Chainlink oracle price are fetched for each market. Chainlink is used as the authoritative strike (it's the settlement oracle).
+3. **Dual strike price** — Both Binance history and Chainlink oracle price are looked up from history buffers for each market. Chainlink uses exact timestamp match (it's the settlement oracle); Binance uses latest price at or before market start.
 
-4. **Killswitch on exchange divergence** — If Binance and Coinbase prices diverge beyond a configurable threshold, all new entries are blocked. This protects against feed issues or flash crashes.
+4. **Budget tracking** — Shared `Arc<Mutex<f64>>` budget is deducted on each buy trade and checked before order placement. When budget drops below $1.00, the engine stops trading. Budget is queryable and settable at runtime via Telegram.
 
-5. **Market rotation** — The bot automatically discovers and rotates to new markets as they open, running continuously across market boundaries.
+5. **Market rotation** — The bot automatically discovers and rotates to new markets as they open, running continuously across market boundaries. Per-market state (trades, cooldowns) is cleared between rotations.
 
-6. **Entry-only vs full-cycle strategies** — The `manages_exit()` flag lets strategies opt out of exit logic. Entry-only strategies (like Bono) place a buy and immediately yield control back to the rotation loop.
+6. **Telegram isolation** — Each bot instance has its own Telegram bot token and runs on a dedicated OS thread with its own single-threaded tokio runtime, preventing any Telegram latency or errors from affecting the trading engine.
+
+7. **Failed order cooldown** — After a CLOB submission failure, the engine waits 3 seconds before attempting another order, preventing rapid-fire failures.
 
 ## External Dependencies
 
 | Crate | Purpose |
 |-------|---------|
-| `polymarket-client-sdk` | CLOB client, WS price streams, Gamma API, order signing, heartbeat |
+| `polymarket-client-sdk` | CLOB client, WS price streams, Gamma API, order signing |
 | `tokio` | Async runtime, channels, signals |
 | `tokio-tungstenite` | WebSocket connections (Binance, Coinbase, Deribit, Chainlink) |
-| `reqwest` | HTTP client (Binance klines, Telegram) |
+| `teloxide` | Telegram Bot API client (long-polling, message sending, command menu) |
+| `reqwest` | HTTP client (Telegram via teloxide) |
 | `alloy-signer-local` | Polygon wallet signing |
 | `k256` | Secp256k1 cryptography |
 | `serde` / `toml` | Config deserialization |

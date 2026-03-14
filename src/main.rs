@@ -48,11 +48,7 @@ async fn async_main(config: AppConfig) {
     let private_key = load_private_key(&config.bot.key_file, config.bot.truncate_key_file);
     let paper_mode = private_key.is_none();
     let mode = if paper_mode { "paper" } else { "live" };
-    debug!(
-        "Starting Serekeš [{}] | mode={}",
-        market_asset.to_uppercase(),
-        mode
-    );
+    debug!("Starting asset={} mode={}", market_asset.to_uppercase(), mode);
 
     // --- Time synchronization (before anything that uses now_ms) ---
     common::time::fetch_time_offset_ms().await;
@@ -113,12 +109,12 @@ async fn async_main(config: AppConfig) {
     if let Some(pk) = private_key {
         if let Some((client, signer)) = authenticate_client(&pk).await {
             engine.set_client(client, signer);
-            debug!("Polymarket SDK authenticated.");
+            debug!("SDK authenticated");
         }
     }
 
     // --- Telegram ---
-    let mut cmds = telegram::commands::Commands::new(&config.bot.name);
+    let mut cmds = telegram::commands::Commands::new();
     let budget_ref = budget.clone();
     cmds.register("budget", "Budget", move |args| bot_budget_command(&budget_ref, args));
     let tg = telegram::spawn(&config.telegram, cmds.build());
@@ -168,8 +164,11 @@ async fn run_bot_loop(
     wait_for_feeds(engine).await;
 
     loop {
-        debug!("Entering market");
         let mut market = discover_market(asset, interval_minutes).await;
+
+        if !resolve_strike_price {
+            debug!("Skipping strike resolution for {}", market.slug);
+        }
 
         if resolve_strike_price {
             match resolve_strike_prices(chainlink_history, binance_history, &market).await {
@@ -186,7 +185,7 @@ async fn run_bot_loop(
                         .expires_at_ms
                         .saturating_sub(common::time::now_ms())
                         .max(1000) as u64;
-                    warn!("No strike price for market {}. Skipping.", market.slug);
+                    warn!("Skipping market {}.", market.slug);
                     sleep(Duration::from_millis(wait_ms)).await;
                     continue;
                 }
@@ -197,16 +196,9 @@ async fn run_bot_loop(
         trade_market(engine, &market, tick_interval_us).await;
         engine.clear_state();
         price_handle.abort();
-        debug!("Exiting market ");
         // Wait for another market
         let remaining_ms = market.expires_at_ms.saturating_sub(common::time::now_ms());
         if remaining_ms > 0 {
-            debug!(
-                "Waiting {:.1}s for market {} to end...",
-                remaining_ms as f64 / 1000.0,
-                market.slug
-            );
-
             sleep(Duration::from_millis((remaining_ms + 1000) as u64)).await;
         }
     }
@@ -217,23 +209,25 @@ async fn run_bot_loop(
 // ---------------------------------------------------------------------------
 
 async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interval_us: u64) {
-    debug!("Trading started. Market {}.", market.slug);
+    debug!("Trading market {} (expires in {:.0}s)", market.slug, market.time_to_expire_ms() as f64 / 1000.0);
+    let mut trade_count = 0usize;
     loop {
         if common::time::now_ms() > market.expires_at_ms + 1000 {
             break;
         }
         // Execute engine tick
         let result = engine.execute_tick().await;
+        if result.traded {
+            trade_count += 1;
+        }
 
         // If Engine completed with market processing then exit
         if result.completed {
-            // TOD
-            //warn!("Budget exhausted. Stopping market {}.", market.slug);
             break;
         }
         tokio::time::sleep(Duration::from_micros(tick_interval_us)).await;
     }
-    debug!("Trading completed. Market {}.", market.slug);
+    debug!("Trading completed. Market {} ({} trades)", market.slug, trade_count);
 }
 
 // ---------------------------------------------------------------------------
@@ -305,14 +299,13 @@ async fn authenticate_client(
     {
         Ok(client) => Some((client, signer)),
         Err(e) => {
-            error!("SDK auth failed: {}", e);
+            error!("SDK auth failed: {e}");
             None
         }
     }
 }
 
 async fn wait_for_feeds(engine: &StrategyEngine) {
-    debug!("Waiting for price feeds...");
     loop {
         let b = engine.binance_rx.borrow().0;
         let c = engine.coinbase_rx.borrow().0;

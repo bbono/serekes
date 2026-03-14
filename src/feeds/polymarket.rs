@@ -31,8 +31,6 @@ async fn fetch_active_market(
     interval_minutes: u32,
 ) -> Result<Market, Box<dyn std::error::Error + Send + Sync>> {
     let asset_upper = asset.to_uppercase();
-    debug!("Fetching active {} market...", asset_upper);
-
     let interval_ms = (interval_minutes as i64) * 60_000;
     let kline_interval = if interval_minutes >= 60 {
         format!("{}h", interval_minutes / 60)
@@ -47,10 +45,6 @@ async fn fetch_active_market(
     for started_at_ms in [bucket_start_ms, bucket_start_ms + interval_ms] {
         let ts_secs = started_at_ms / 1000;
         let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts_secs);
-        debug!(
-            "Discovering active {} {}m market...",
-            asset_upper, interval_minutes
-        );
 
         let request = gamma::types::request::EventBySlugRequest::builder()
             .slug(&slug)
@@ -88,10 +82,7 @@ async fn fetch_active_market(
             .and_then(|d| d.try_into().ok())
             .unwrap_or(0.0);
 
-        debug!(
-            "Found {} {}m market {} (tick_size={} min_order_size={})",
-            asset_upper, interval_minutes, slug, tick_size, min_order_size
-        );
+        debug!("Found market {} tick_size={} min_order_size={}", slug, tick_size, min_order_size);
         return Ok(Market::new(
             slug,
             up_token,
@@ -136,7 +127,6 @@ pub async fn resolve_strike_prices(
     binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     market: &Market,
 ) -> Option<(f64, f64)> {
-    debug!("Searching strike prices for market {}...", market.slug);
     let deadline_ms = market.started_at_ms + 10_000;
     let mut chainlink_strike = 0.0f64;
     let mut binance_strike = 0.0f64;
@@ -151,6 +141,12 @@ pub async fn resolve_strike_prices(
             return Some((chainlink_strike, binance_strike));
         }
         if crate::common::time::now_ms() > deadline_ms {
+            warn!(
+                "Strike resolution timed out for {}: chainlink={} binance={}",
+                market.slug,
+                if chainlink_strike > 0.0 { format!("{:.2}", chainlink_strike) } else { "missing".into() },
+                if binance_strike > 0.0 { format!("{:.2}", binance_strike) } else { "missing".into() },
+            );
             return None;
         }
         sleep(Duration::from_millis(100)).await;

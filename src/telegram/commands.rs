@@ -6,15 +6,13 @@ use super::CommandHandler;
 type Handler = Box<dyn Fn(&str) -> String + Send + Sync>;
 
 pub struct Commands {
-    prefix: String,
     handlers: HashMap<String, Handler>,
     menu_commands: Vec<BotCommand>,
 }
 
 impl Commands {
-    pub fn new(bot_name: &str) -> Self {
+    pub fn new() -> Self {
         Self {
-            prefix: bot_name.to_lowercase(),
             handlers: HashMap::new(),
             menu_commands: Vec::new(),
         }
@@ -27,10 +25,9 @@ impl Commands {
         handler: impl Fn(&str) -> String + Send + Sync + 'static,
     ) {
         let name = cmd.strip_prefix('/').unwrap_or(cmd);
-        let prefixed = format!("/{}_{}", self.prefix, name);
-        let menu_name = format!("{}_{}", self.prefix, name);
-        self.handlers.insert(prefixed, Box::new(handler));
-        self.menu_commands.push(BotCommand::new(menu_name, description));
+        let key = format!("/{}", name);
+        self.handlers.insert(key, Box::new(handler));
+        self.menu_commands.push(BotCommand::new(name.to_string(), description));
     }
 
     pub fn build(self) -> Built {
@@ -41,7 +38,6 @@ impl Commands {
         Built {
             handler,
             menu_commands: self.menu_commands,
-            prefix: self.prefix,
         }
     }
 }
@@ -49,5 +45,4 @@ impl Commands {
 pub struct Built {
     pub handler: CommandHandler,
     pub menu_commands: Vec<BotCommand>,
-    pub prefix: String,
 }

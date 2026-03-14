@@ -16,13 +16,11 @@ pub type CommandHandler = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync
 #[derive(Clone)]
 pub struct Telegram {
     tx: mpsc::UnboundedSender<String>,
-    bot_name: String,
 }
 
 impl Telegram {
     pub fn send(&self, msg: impl Into<String>) {
-        let escaped = escape_markdown(&msg.into());
-        let _ = self.tx.send(format!("_{}_\n{}", self.bot_name.to_uppercase(), escaped));
+        let _ = self.tx.send(escape_markdown(&msg.into()));
     }
 }
 
@@ -33,12 +31,11 @@ pub fn spawn(config: &TelegramConfig, built: commands::Built) -> Telegram {
 
     if !config.is_enabled() {
         warn!("Telegram disabled (missing bot_token or chat_id)");
-        return Telegram { tx, bot_name: built.prefix.clone() };
+        return Telegram { tx };
     }
 
     let bot_token = config.bot_token.clone();
     let chat_id = ChatId(config.chat_id);
-    let bot_name = built.prefix.clone();
 
     std::thread::Builder::new()
         .name("telegram".into())
@@ -59,17 +56,8 @@ pub fn spawn(config: &TelegramConfig, built: commands::Built) -> Telegram {
                 tokio::spawn(outbound_loop(bot_out, chat_id, rx));
 
                 // Sync command menu
-                {
-                    let prefix = format!("{}_", built.prefix);
-                    let mut merged = match bot.get_my_commands().await {
-                        Ok(existing) => existing,
-                        Err(_) => Vec::new(),
-                    };
-                    merged.retain(|c| c.command.contains('_') && !c.command.starts_with(&prefix));
-                    merged.extend(built.menu_commands);
-                    if let Err(e) = bot.set_my_commands(merged).await {
-                        error!("Failed to set bot commands menu: {}", e);
-                    }
+                if let Err(e) = bot.set_my_commands(built.menu_commands).await {
+                    error!("Failed to set bot commands menu: {}", e);
                 }
 
                 let bot_in = bot.clone();
@@ -83,7 +71,7 @@ pub fn spawn(config: &TelegramConfig, built: commands::Built) -> Telegram {
 
     debug!("Telegram bot started on dedicated thread (chat_id={})", config.chat_id);
 
-    Telegram { tx, bot_name }
+    Telegram { tx }
 }
 
 async fn outbound_loop(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<String>) {
@@ -137,12 +125,15 @@ async fn inbound_loop(bot: Bot, owner_chat_id: ChatId, handler: CommandHandler) 
             };
 
             let (cmd, args) = match text.split_once(' ') {
-                Some((c, a)) => (c, a),
+                Some((c, a)) => (c, a.trim()),
                 None => (text, ""),
             };
 
             if let Some(reply) = handler(cmd, args) {
-                if let Err(e) = bot.send_message(owner_chat_id, &reply).await {
+                let escaped = escape_markdown(&reply);
+                if let Err(e) = bot.send_message(owner_chat_id, &escaped)
+                    .parse_mode(ParseMode::MarkdownV2).await
+                {
                     error!("Telegram reply failed: {}", e);
                 }
             }

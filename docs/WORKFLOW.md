@@ -12,9 +12,11 @@
    - **Coinbase** — `ticker` stream → `coinbase_tx` (secondary oracle)
    - **Deribit** — DVOL index → `dvol_tx` + `dvol_history` (implied volatility)
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
-7. Build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
-8. Authenticate Polymarket SDK (if private key present → live mode). Heartbeat background task auto-starts on auth — keeps resting orders alive for future GTC/GTD strategies.
-9. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
+7. Create shared budget (`Arc<Mutex<f64>>` from `initial_budget`)
+8. Build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`) and shared budget
+9. Authenticate Polymarket SDK (if private key present → live mode)
+10. Start Telegram bot on dedicated thread — register commands, sync menu
+11. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
 
 ```mermaid
 flowchart TD
@@ -27,10 +29,12 @@ flowchart TD
     F --> F2["Coinbase ticker"]
     F --> F3["Deribit DVOL"]
     F --> F4["Chainlink (Polymarket WS)"]
-    F1 & F2 & F3 & F4 --> G["7. Build StrategyEngine"]
-    G --> H["8. Authenticate SDK (if live)"]
-    H --> I["9. Wait for all feeds > 0"]
-    I --> J["Market Rotation Loop"]
+    F1 & F2 & F3 & F4 --> G["7. Create shared budget"]
+    G --> H["8. Build StrategyEngine"]
+    H --> I["9. Authenticate SDK (if live)"]
+    I --> I2["10. Start Telegram bot"]
+    I2 --> J["11. Wait for all feeds > 0"]
+    J --> K["Market Rotation Loop"]
 ```
 
 ## Market Rotation Loop
@@ -38,20 +42,23 @@ flowchart TD
 ```mermaid
 flowchart TD
     S1["① DISCOVER MARKET
-    Compute time bucket from now/interval_secs
+    Compute time bucket from now/interval_ms
     Try current bucket slug, then next bucket
     Fetch event via Gamma API
     Extract Up/Down token IDs + outcomes
-    Fetch Binance kline open price (strike)
-    Skip if already processed this slug"]
+    Extract tick_size + min_order_size"]
 
-    S2["② LOOKUP CHAINLINK STRIKE PRICE
-    Search chainlink_history for exact ts match
-    Wait up to 10s for match to appear"]
+    S2{"resolve_strike_price
+    enabled?"}
+
+    S2a["② RESOLVE STRIKE PRICES
+    Chainlink: exact timestamp match in history
+    Binance: latest price ≤ started_at_ms in history
+    Wait up to 10s for both"]
 
     S3["③ UPDATE SHARED MARKET STATE
-    Create Market struct with both strikes
-    Set strike_price = chainlink value"]
+    Create Market struct
+    Set strike_price (chainlink) + strike_price_binance"]
 
     S4["④ SPAWN POLYMARKET PRICE WS
     Subscribe to bid/ask for both Up/Down tokens"]
@@ -60,45 +67,65 @@ flowchart TD
     execute_tick() each iteration
     sleep(tick_interval_us) between ticks
     Tick rate configurable via engine_ticks_per_second
-    Engine returns true → wait for expiry + 1s"]
+    Exits when: budget < $1 OR market expired"]
 
     S6["⑥ CLEANUP
+    Clear engine state (trades, cooldowns)
     Abort Polymarket price WS task
-    Log rotation"]
+    Wait for market expiry + 1s"]
 
     S1 --> S2
-    S2 -->|no match| SKIP["Skip market, wait for expiry"]
+    S2 -->|yes| S2a
+    S2a -->|no match| SKIP["Skip market, wait for expiry"]
     SKIP --> S6
-    S2 -->|match found| S3
+    S2a -->|match found| S3
+    S2 -->|no| S4
     S3 --> S4
     S4 --> S5
-    S5 -->|market expires| S6
+    S5 -->|market expires or budget exhausted| S6
     S6 --> S1
 ```
 
-## Tick Loop (`execute_tick` — configurable rate)
+## Tick Loop (`execute_tick`)
 
 ```mermaid
 flowchart TD
-    START["execute_tick()"] --> KS{"① KILLSWITCH
-    |binance - coinbase| > threshold
-    AND both > 0?"}
+    START["execute_tick()"] --> SNAP["① snapshot()
+    Build TickContext from all feeds"]
 
-    KS -->|YES| BLOCK["log warning (rate-limited)
-    return None"]
+    SNAP --> ENTRY["② strategy.create_order(ctx)"]
+    ENTRY -->|None| RESULT["return TickResult"]
+    ENTRY -->|"Some((direction, intent))"| BUDGET{"③ Budget check
+    (buy orders only)
+    cost > budget?"}
 
-    KS -->|NO| ENTRY["② strategy.create_order(ctx)"]
-    ENTRY -->|None| DONE["return None"]
-    ENTRY -->|"Some((direction, intent))"| ORDER["③ try_order()
-    validate min size
-    sign + submit"]
-    ORDER -->|success| TRADE["return Some(Trade)"]
-    ORDER -->|failure| DONE
+    BUDGET -->|YES| SKIP["log warning
+    return TickResult"]
+    BUDGET -->|NO| MINSIZE{"④ Min order size
+    Market: ≥ 1 USDC
+    Limit: ≥ market.min_order_size"}
+
+    MINSIZE -->|below| SKIP
+    MINSIZE -->|OK| COOLDOWN{"⑤ Failed order cooldown
+    last failure < 3s ago?"}
+
+    COOLDOWN -->|YES| SKIP
+    COOLDOWN -->|NO| ORDER["⑥ sign + submit
+    (or paper simulate)"]
+    ORDER -->|success| TRADE["Deduct cost from budget
+    Push to trades
+    return TickResult"]
+    ORDER -->|failure| SKIP
+
+    TRADE --> DONE["completed = budget < $1.00"]
+    SKIP --> DONE
+    RESULT --> DONE
 ```
 
 Key behavioral notes:
-- Killswitch blocks order placement when exchanges diverge
-- The engine is stateless — the strategy decides whether to place an order each tick
+- The engine tracks budget and marks `completed = true` when budget drops below $1.00
+- Failed orders trigger a 3-second cooldown before the next attempt
+- The strategy is stateless per tick — it decides whether to place an order each tick
 
 ## Strategy Trait
 
@@ -106,18 +133,9 @@ Strategies implement the `Strategy` trait:
 
 ```rust
 trait Strategy {
-    // Called each tick when idle. Return Some((direction, order)) to place an order.
-    fn create_order(&self, ctx: &TickContext, market: &Market)
-        -> Option<(TokenDirection, OrderParams)>;
-
-    // Called each tick while holding a position.
-    // Return Some(OrderParams) to sell, None to keep holding.
-    fn create_exit_order(&self, ctx: &TickContext, market: &Market, position_size: f64)
-        -> Option<OrderParams> { None }
-
-    // Whether this strategy manages its own exit logic.
-    // If false, the engine considers itself done immediately after entry.
-    fn manages_exit(&self) -> bool { false }
+    /// Called each tick. Return Some((direction, intent)) to place an order.
+    fn create_order(&self, ctx: &TickContext)
+        -> Option<(TokenDirection, OrderIntent)>;
 }
 ```
 
@@ -125,68 +143,71 @@ trait Strategy {
 - `binance_price`, `binance_ts` — Binance spot price + timestamp (ms)
 - `coinbase_price`, `coinbase_ts` — Coinbase spot price + timestamp (ms)
 - `chainlink_price`, `chainlink_ts` — Chainlink oracle price + timestamp (ms)
-- `dvol` — Deribit implied volatility index
-- `now_ms` — current time adjusted for Polymarket server offset (ms)
-- `binance_history`, `chainlink_history` — Arc<Mutex<VecDeque<(f64, i64)>>> price histories
+- `dvol`, `dvol_ts` — Deribit implied volatility index + timestamp (ms)
+- `polymarket_now_ms` — current time adjusted for Polymarket server offset (ms)
+- `market` — `Option<Arc<Market>>` with live bid/ask prices
+- `binance_history`, `chainlink_history`, `dvol_history` — `Arc<Mutex<VecDeque<(f64, i64)>>>` price histories
+- `trades` — `Vec<Trade>` of all trades placed during this market
 
-**OrderParams**: `Limit { price, size }` or `Market { amount, price, order_type }`.
+**OrderIntent**: `Limit { side, price, size, order_type }` or `Market { side, amount, order_type }`.
 
-The engine handles all infrastructure: order signing,
-killswitch, and Telegram alerts. The strategy only decides
+The engine handles all infrastructure: order signing, budget tracking,
+min-size validation, cooldowns, and Telegram alerts. The strategy only decides
 *when* to trade and *what order* to place.
 
 ## Bono Strategy
 
-Entry-only strategy (`manages_exit = false`):
+Entry-only strategy:
 
-1. Wait `delay_secs` (default 10s) after market start
+1. Wait until market is within 30 seconds of expiry (`time_to_expire_ms() <= 30_000`)
 2. Check both Up and Down ask prices are > 0
 3. Buy whichever side has the higher ask price
-4. Place a FOK market order for $1.00 at that price
-5. Engine marks done immediately after buy (no exit management)
+4. Only if the ask price is between 0.85 and 0.97 (exclusive/inclusive)
+5. Place a FOK market order for $1.00 USDC at that price
+6. Engine deducts cost from budget; marks completed if budget < $1
 
-Config: `delay_secs`, `budget` (budget currently unused in entry logic, hardcoded $1.00 amount).
+## Konzerva Strategy
+
+Placeholder strategy — always returns `None` (no orders placed). Useful for testing infrastructure without trading.
 
 ## Order Execution
 
 ### try_order (engine)
 
-- **Live mode**: Signs order via Polymarket SDK → submits to CLOB. On failure → returns None.
-- **Paper mode**: Simulates a fill using best ask price. No on-chain interaction.
-- Sends Telegram alert on successful entry.
-
-### Pre-submission validation (engine)
-
-- Checks order size against market's `min_order_size` (from Gamma API). Orders below minimum are skipped with a warning.
+1. **Budget check** (buy orders only): if order cost > remaining budget → skip with warning
+2. **Min order size**: Market orders require ≥ 1 USDC; Limit orders require ≥ `market.min_order_size`
+3. **Cooldown**: If last order failed < 3s ago → skip
+4. **Live mode**: Signs order via Polymarket SDK → submits to CLOB. On failure → sets cooldown timestamp, returns None.
+5. **Paper mode**: Simulates a fill using best ask price. No on-chain interaction.
+6. **Fill resolution**: For matched market orders, actual fill price/size is computed from the CLOB response's `making_amount` / `taking_amount`.
+7. **Budget deduction**: On successful trade, cost is deducted from shared budget. Buy cost = USDC spent; sell cost = 0.
 
 ### sign_and_submit (engine)
 
-Handles both Limit and Market order types:
-- Converts price/size to `Decimal` (2 decimal places for limit, 4 for market price)
-- Validates amounts > 0 before submission
-- Builds the order via SDK builder pattern (SDK auto-validates tick size and fetches neg_risk)
+Handles both Limit and Market order types via SDK builder pattern:
+- **Limit**: `client.limit_order().order_type().token_id().side().price().size().build()`
+- **Market**: `client.market_order().order_type().token_id().side().amount().build()` — amount is `Amount::usdc` for buys, `Amount::shares` for sells
+- SDK auto-validates tick size and fetches neg_risk
 - Signs with wallet private key (Polygon chain)
 - Posts to Polymarket CLOB
 - Handles response status: `Matched` (filled), `Delayed` (matching delay), `Unmatched` (no fill), `Live` (resting)
 - Stores the `OrderStatusType` from the CLOB response in the returned `Trade.order_status` field (paper mode defaults to `Matched`)
 
-### Heartbeat (SDK auto-managed)
-
-When the `heartbeats` SDK feature is enabled, the SDK automatically starts a background task on authentication that sends periodic heartbeat signals to the CLOB (`POST /heartbeats`). This prevents automatic cancellation of resting orders (GTC/GTD). The current Bono strategy uses FOK orders only, but future strategies using limit orders will benefit from this. The heartbeat interval is configurable via `ClobConfig` (default 5s).
-
 ## Market Discovery
 
 On startup (and after each market expires):
 
-1. Computes current time bucket: `(now / interval_secs) * interval_secs`
-2. Checks two slugs: current bucket and next bucket (e.g. `btc-updown-5m-1710000000`)
+1. Computes current time bucket: `(now_ms / interval_ms) * interval_ms`
+2. Checks two slugs: current bucket and next bucket (e.g. `btc-updown-5m-1710000`)
 3. Fetches market metadata from Polymarket Gamma API (`event_by_slug`)
 4. Extracts Up/Down token IDs from market outcomes (matches "UP"/"YES" and "DOWN"/"NO")
 5. Extracts `tick_size` and `min_order_size` from Gamma market metadata
-6. Fetches strike price from Binance kline API (candle open price at bucket start)
-7. Looks up chainlink strike price from history (exact timestamp match with `started_ms`)
-8. Creates `Market` struct in `shared_market` with both strike prices, tick_size, and min_order_size
-9. Subscribes to Polymarket price WebSocket for both tokens
+6. Creates `Market` struct with both token sides
+7. If `resolve_strike_price` is enabled:
+   - Looks up chainlink strike from history (exact timestamp match with `started_at_ms`)
+   - Looks up binance strike from history (latest price at or before `started_at_ms`)
+   - Waits up to 10s for both; skips market if not found
+8. Subscribes to Polymarket price WebSocket for both tokens
 
 ## Data Feeds
 
@@ -196,7 +217,7 @@ On startup (and after each market expires):
 | Coinbase price | `ticker` WS | `watch<(f64, i64)>` | None | Exponential backoff 5s–60s |
 | Chainlink price | Polymarket live-data WS | `watch<(f64, i64)>` | VecDeque (interval_mins * 60 + 5) | Exponential backoff 5s–60s |
 | Deribit DVOL | `deribit_volatility_index` WS | `watch<(f64, i64)>` | VecDeque (configurable) | Exponential backoff 5s–60s |
-| Polymarket prices | SDK `subscribe_prices` | `Arc<Mutex<Option<Market>>>` | None | Fixed 5s then 2s retry |
+| Polymarket prices | SDK `subscribe_prices` | `Arc<Mutex<Option<Arc<Market>>>>` | None | 5s on subscribe error, 2s on stream error |
 
 Backoff formula: `min(5 * 2^attempt, 60)` seconds.
 
@@ -205,6 +226,19 @@ Backoff formula: `min(5 * 2^attempt, 60)` seconds.
 The price WS updates incoming bid/ask directly:
 - Price must be > 0
 - Token must belong to current market (up or down)
+- Timestamp is converted to milliseconds (`timestamp * 1000`)
+
+## Telegram Integration
+
+Each bot instance has its own Telegram bot token (one token per instance). The Telegram bot runs on a **dedicated OS thread** with its own single-threaded tokio runtime, fully isolated from the main engine runtime.
+
+### Architecture
+- **Outbound**: Messages sent via `Telegram.send()` → unbounded mpsc channel → outbound loop with 3 retry attempts (MarkdownV2 format)
+- **Inbound**: Long-polling loop (`getUpdates`) → owner-only filtering by `chat_id` → command dispatch
+- **Commands**: Simple routing (`/command`) with auto-synced bot menu
+
+### Registered Commands
+- `/budget [amount]` — Query or set the bot's USDC budget at runtime
 
 ## Config Structure
 
@@ -232,6 +266,10 @@ show_module = true
 # binance_history_secs = 300          # Rolling price history window (default: interval * 60)
 # chainlink_history_secs = 300
 # dvol_history_secs = 300
+
+[telegram]
+bot_token = ""                        # Bot API token from @BotFather (empty = disabled)
+chat_id = 0                           # Owner's Telegram chat ID
 
 [engine]
 strategy = "bono"                     # Trading strategy: bono, konzerva
