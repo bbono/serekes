@@ -1,32 +1,36 @@
 # Workflow
 
-## Startup (bot.rs)
+## Startup (main.rs)
 
-1. Load `config.toml` — validate asset (btc/eth/sol/xrp) and interval (5/15)
-2. Read wallet private key from key file (if exists)
-3. Spawn 4 WebSocket feed tasks (all concurrent):
+1. Load `config.toml` — validate asset (btc/eth/sol/xrp), interval (5/15), worker threads, tick rate
+2. Init logger
+3. Build tokio runtime with configurable `worker_threads` (default 2)
+4. Sync server time offset with Polymarket CLOB
+5. Read wallet private key from key file (if exists)
+6. Spawn 4 WebSocket feed tasks (all concurrent):
    - **Binance** — `aggTrade` stream → `binance_tx` + `binance_history` (primary price oracle)
    - **Coinbase** — `ticker` stream → `coinbase_tx` (secondary oracle)
-   - **Deribit** — DVOL index → `dvol_tx` (implied volatility)
+   - **Deribit** — DVOL index → `dvol_tx` + `dvol_history` (implied volatility)
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
-4. Sync server time offset with Polymarket CLOB
-5. Init Telegram, build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
-6. Authenticate Polymarket SDK (if private key present → live mode). Heartbeat background task auto-starts on auth — keeps resting orders alive for future GTC/GTD strategies.
-7. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
+7. Build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`)
+8. Authenticate Polymarket SDK (if private key present → live mode). Heartbeat background task auto-starts on auth — keeps resting orders alive for future GTC/GTD strategies.
+9. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
 
 ```mermaid
 flowchart TD
-    A["1. Load config.toml"] --> B["2. Read wallet key"]
-    B --> C["3. Spawn WS feeds (parallel)"]
-    C --> C1["Binance aggTrade"]
-    C --> C2["Coinbase ticker"]
-    C --> C3["Deribit DVOL"]
-    C --> C4["Chainlink (Polymarket WS)"]
-    C1 & C2 & C3 & C4 --> D["4. Sync time with Polymarket"]
-    D --> E["5. Init Telegram + StrategyEngine"]
-    E --> F["6. Authenticate SDK (if live)"]
-    F --> G["7. Wait for all feeds > 0"]
-    G --> H["Market Rotation Loop"]
+    A["1. Load config.toml"] --> B["2. Init logger"]
+    B --> C["3. Build tokio runtime<br/>(worker_threads from config)"]
+    C --> D["4. Sync time with Polymarket"]
+    D --> E["5. Read wallet key"]
+    E --> F["6. Spawn WS feeds (parallel)"]
+    F --> F1["Binance aggTrade"]
+    F --> F2["Coinbase ticker"]
+    F --> F3["Deribit DVOL"]
+    F --> F4["Chainlink (Polymarket WS)"]
+    F1 & F2 & F3 & F4 --> G["7. Build StrategyEngine"]
+    G --> H["8. Authenticate SDK (if live)"]
+    H --> I["9. Wait for all feeds > 0"]
+    I --> J["Market Rotation Loop"]
 ```
 
 ## Market Rotation Loop
@@ -54,8 +58,9 @@ flowchart TD
 
     S5["⑤ TICK LOOP
     execute_tick() each iteration
-    yield_now() between ticks (cooperative)
-    Engine returns true → wait for expiry + 5s"]
+    sleep(tick_interval_us) between ticks
+    Tick rate configurable via engine_ticks_per_second
+    Engine returns true → wait for expiry + 1s"]
 
     S6["⑥ CLEANUP
     Abort Polymarket price WS task
@@ -71,7 +76,7 @@ flowchart TD
     S6 --> S1
 ```
 
-## Tick Loop (`execute_tick` — every yield)
+## Tick Loop (`execute_tick` — configurable rate)
 
 ```mermaid
 flowchart TD
@@ -190,7 +195,7 @@ On startup (and after each market expires):
 | Binance price | `aggTrade` WS | `watch<(f64, i64)>` | VecDeque (configurable max) | Exponential backoff 5s–60s |
 | Coinbase price | `ticker` WS | `watch<(f64, i64)>` | None | Exponential backoff 5s–60s |
 | Chainlink price | Polymarket live-data WS | `watch<(f64, i64)>` | VecDeque (interval_mins * 60 + 5) | Exponential backoff 5s–60s |
-| Deribit DVOL | `deribit_volatility_index` WS | `watch<f64>` | None | Exponential backoff 5s–60s |
+| Deribit DVOL | `deribit_volatility_index` WS | `watch<(f64, i64)>` | VecDeque (configurable) | Exponential backoff 5s–60s |
 | Polymarket prices | SDK `subscribe_prices` | `Arc<Mutex<Option<Market>>>` | None | Fixed 5s then 2s retry |
 
 Backoff formula: `min(5 * 2^attempt, 60)` seconds.
@@ -204,27 +209,32 @@ The price WS updates incoming bid/ask directly:
 ## Config Structure
 
 ```toml
-log_level = "info"           # error/warn/info/debug/trace
-
-[wallet]
-key_file = ".key"            # Path to Polygon private key file
-                             # Key present → LIVE mode, absent → PAPER mode
+[bot]
+name = "bono"                         # Bot instance name (required)
+key_file = ".key"                     # Path to Polygon private key file
+                                      # Key present → LIVE mode, absent → PAPER mode
+truncate_key_file = true              # Erase key file after reading
+worker_threads = 2                    # Tokio runtime worker threads (1–16)
+engine_ticks_per_second = 1000        # Trading loop tick rate (default 1000 = 1ms)
+initial_budget = 4.00                 # USDC budget per bot instance
 
 [market]
-asset = "btc"                # btc/eth/sol/xrp
-interval_minutes = 5         # 5 or 15
+asset = "btc"                         # btc/eth/sol/xrp
+interval_minutes = 5                  # 5 or 15
+resolve_strike_price = true           # Wait for Chainlink/Binance strike before trading
+
+[logger]
+level = "info"                        # error/warn/info/debug/trace (comma-separated per-module)
+show_timestamp = true
+show_module = true
+
+[feeds]
+# binance_history_secs = 300          # Rolling price history window (default: interval * 60)
+# chainlink_history_secs = 300
+# dvol_history_secs = 300
 
 [engine]
-exchange_price_divergence_threshold = 50.0  # Killswitch threshold ($)
-log_interval_secs = 0.5                     # Min seconds between status logs
-
-[strategy.bono]
-delay_secs = 10.0            # Seconds after market start before entry
-budget = 3.0                 # USDC budget per trade
-
-[telegram]
-bot_token = ""               # Telegram bot token
-chat_id = ""                 # Telegram chat ID
+strategy = "bono"                     # Trading strategy: bono, konzerva
 ```
 
 ## Graceful Shutdown

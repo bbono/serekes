@@ -62,19 +62,19 @@ graph TD
 
 ```mermaid
 graph LR
-    SRC["src/"] --> BOT["bot.rs<br/>Entry point: main(), WS spawners, market discovery"]
-    SRC --> CFG["config.rs<br/>AppConfig deserialization from TOML"]
-    SRC --> TYP["types.rs<br/>Domain types + Strategy trait"]
-    SRC --> ENG["engine.rs<br/>StrategyEngine: tick loop, order execution"]
-    SRC --> STRAT["strategies/"]
-    STRAT --> SMOD["mod.rs<br/>Strategy re-exports"]
-    STRAT --> BONO["bono.rs<br/>BonoStrategy implementation"]
+    SRC["src/"] --> MAIN["main.rs<br/>Entry point: main(), runtime setup,<br/>bot loop, market rotation"]
+    SRC --> COMMON["common/<br/>config.rs, logger.rs, time.rs"]
+    SRC --> FEEDS["feeds/<br/>binance.rs, coinbase.rs, deribit.rs,<br/>chainlink.rs, polymarket.rs"]
+    SRC --> ENG["engine/<br/>mod.rs (StrategyEngine, snapshot)<br/>order.rs (sign+submit)"]
+    SRC --> STRAT["strategy/<br/>mod.rs, bono.rs, konzerva.rs"]
+    SRC --> TYP["types/<br/>Domain types + Strategy trait"]
 ```
 
 ## Layer Responsibilities
 
-### Infrastructure Layer (`bot.rs`)
+### Infrastructure Layer (`main.rs` + `feeds/`)
 
+- Configurable tokio runtime (`worker_threads` in config)
 - WebSocket lifecycle management (connect, reconnect, backoff)
 - Data feed parsing (Binance aggTrade, Coinbase ticker, Deribit DVOL, Chainlink oracle)
 - Price history buffering (ring buffers via VecDeque)
@@ -82,11 +82,11 @@ graph LR
 - Market discovery via Polymarket Gamma API
 - Binance kline API for strike price
 - Time synchronization with Polymarket server
+- Configurable tick rate (`engine_ticks_per_second` in config, converted to microsecond sleep interval)
 - Graceful shutdown (SIGINT/SIGTERM)
 
-### Engine Layer (`engine.rs`, types in `types.rs`)
+### Engine Layer (`engine/`, types in `types/`)
 
-- Tick-based execution loop
 - TickContext snapshot construction from all feeds
 - Killswitch: halts entries when Binance/Coinbase prices diverge beyond threshold
 - Order signing and submission via Polymarket SDK (tick size + neg_risk auto-handled by SDK)
@@ -97,29 +97,30 @@ graph LR
 - Telegram trade alerts
 - Heartbeat keep-alive (auto-managed by SDK when `heartbeats` feature enabled — prevents cancellation of resting GTC/GTD orders)
 
-### Business Logic Layer (`strategies/`)
+### Business Logic Layer (`strategy/`)
 
 - Pure trading logic — no I/O, no async, no infrastructure
-- Receives `TickContext` (read-only market snapshot) and `Market` (Polymarket state)
+- Receives `TickContext` (read-only market snapshot)
 - Returns `Option<OrderParams>` — the engine handles everything else
 - Pluggable via the `Strategy` trait
 
 ### Support Services
 
-- **Config** (`config.rs`): TOML deserialization with defaults and validation
-- **Telegram** (`telegram.rs`): Non-blocking alert sender via `OnceLock` + `tokio::spawn`
-- **Types** (`types.rs`): Shared domain types (`Market`, `TokenSide`, `TokenDirection`, `Strategy` trait)
+- **Config** (`common/config.rs`): TOML deserialization with defaults and validation
+- **Logger** (`common/logger.rs`): Configurable log formatting (timestamp, module path)
+- **Time** (`common/time.rs`): Server-synced `now_ms()` with Polymarket offset
+- **Types** (`types/`): Shared domain types (`Market`, `TickContext`, `TokenDirection`, `Strategy` trait)
 
 ## Concurrency Model
 
-The bot uses **Tokio** for async concurrency:
+The bot uses **Tokio** with a configurable multi-threaded runtime:
 
+- **Runtime** — `worker_threads` configurable in `[bot]` config (default 2). Tunable for CPU vs throughput tradeoff.
 - **4 long-lived WS tasks** — each spawned via `tokio::spawn`, run independently with auto-reconnect
 - **1 per-market WS task** — spawned for each active market, aborted on market expiry
 - **Main task** — runs the market rotation loop synchronously (discover → tick → cleanup → repeat)
+- **Tick loop** — sleeps `1_000_000 / engine_ticks_per_second` microseconds between ticks. Default 1000 ticks/sec (1ms). Configurable in `[bot]` config.
 - **Communication** — `watch` channels for latest-value feeds, `Arc<Mutex<>>` for shared mutable state
-
-No thread pool tuning needed — all I/O is async, compute is minimal.
 
 ## Data Flow
 
