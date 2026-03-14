@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
 
 use super::{backoff_secs, parse_json, push_history};
 
@@ -18,7 +17,7 @@ pub fn spawn_chainlink_ws(
     tokio::spawn(async move {
         let mut attempts = 0u32;
         loop {
-            match connect_async(Url::parse("wss://ws-live-data.polymarket.com").unwrap()).await {
+            match connect_async("wss://ws-live-data.polymarket.com").await {
                 Ok((mut ws_stream, _)) => {
                     attempts = 0;
                     info!("Connected to Chainlink WS");
@@ -30,7 +29,7 @@ pub fn spawn_chainlink_ws(
                             "filters": format!("{{\"symbol\":\"{}/usd\"}}", asset)
                         }]
                     });
-                    let _ = ws_stream.send(Message::Text(sub.to_string())).await;
+                    let _ = ws_stream.send(Message::Text(sub.to_string().into())).await;
                     let (mut write, mut read) = ws_stream.split();
                     while let Some(Ok(msg)) = read.next().await {
                         match msg {

@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
 
 use super::{backoff_secs, parse_json, push_history};
 
@@ -22,7 +21,7 @@ pub fn spawn_binance_ws(
     tokio::spawn(async move {
         let mut attempts = 0u32;
         loop {
-            match connect_async(Url::parse(&url).unwrap()).await {
+            match connect_async(&url).await {
                 Ok((ws_stream, _)) => {
                     attempts = 0;
                     info!("Connected to Binance WS");

@@ -3,7 +3,6 @@ use log::{error, info};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
 
 use super::{backoff_secs, parse_json};
 
@@ -12,7 +11,7 @@ pub fn spawn_coinbase_ws(asset: &str, tx: watch::Sender<(f64, i64)>) {
     tokio::spawn(async move {
         let mut attempts = 0u32;
         loop {
-            match connect_async(Url::parse("wss://ws-feed.exchange.coinbase.com").unwrap()).await {
+            match connect_async("wss://ws-feed.exchange.coinbase.com").await {
                 Ok((mut ws_stream, _)) => {
                     attempts = 0;
                     info!("Connected to Coinbase WS");
@@ -21,7 +20,7 @@ pub fn spawn_coinbase_ws(asset: &str, tx: watch::Sender<(f64, i64)>) {
                         "product_ids": [product],
                         "channels": ["ticker"]
                     });
-                    let _ = ws_stream.send(Message::Text(sub.to_string())).await;
+                    let _ = ws_stream.send(Message::Text(sub.to_string().into())).await;
                     let (mut write, mut read) = ws_stream.split();
                     while let Some(Ok(msg)) = read.next().await {
                         match msg {
