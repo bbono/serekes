@@ -27,3 +27,8 @@ codegen-units = 1
 panic = 'abort'
 opt-level = 3
 strip = true
+
+[profile.profiling]
+inherits = "release"    # same perf settings as release
+strip = false           # ← override: keep symbols
+debug = true

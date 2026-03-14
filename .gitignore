@@ -7,3 +7,6 @@ target/
 
 .lock
 .key
+
+analysis
+**/*.gz
