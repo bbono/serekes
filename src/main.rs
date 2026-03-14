@@ -2,6 +2,7 @@ mod common;
 mod engine;
 mod feeds;
 mod strategy;
+mod telegram;
 mod types;
 
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
@@ -25,6 +26,10 @@ use feeds::{
 use types::Market;
 
 fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let config = AppConfig::load("config.toml");
     common::logger::init(&config.bot.name, &config.logger);
 
@@ -102,7 +107,7 @@ async fn async_main(config: AppConfig) {
         binance_history.clone(),
         chainlink_history.clone(),
         dvol_history.clone(),
-        budget,
+        budget.clone(),
     );
 
     if let Some(pk) = private_key {
@@ -111,6 +116,13 @@ async fn async_main(config: AppConfig) {
             info!("Polymarket SDK authenticated.");
         }
     }
+
+    // --- Telegram ---
+    let mut cmds = telegram::commands::Commands::new(&config.bot.name);
+    let budget_ref = budget.clone();
+    cmds.register("budget", "Budget", move |args| bot_budget_command(&budget_ref, args));
+    let tg = telegram::spawn(&config.telegram, cmds.build());
+    tg.send(format!("{} started.", config.bot.name));
 
     // --- Graceful shutdown ---
     let mut sigterm =
@@ -222,6 +234,26 @@ async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interva
         tokio::time::sleep(Duration::from_micros(tick_interval_us)).await;
     }
     info!("<-- Trading completed. Market {}.", market.slug);
+}
+
+// ---------------------------------------------------------------------------
+// Telegram commands
+// ---------------------------------------------------------------------------
+
+fn bot_budget_command(budget: &Arc<Mutex<f64>>, args: &str) -> String {
+    let args = args.trim();
+    if args.is_empty() {
+        let b = *budget.lock().unwrap_or_else(|e| e.into_inner());
+        return format!("{:.2} USD", b);
+    }
+    match args.parse::<f64>() {
+        Ok(new_budget) => {
+            let mut b = budget.lock().unwrap_or_else(|e| e.into_inner());
+            *b = new_budget;
+            format!("Budget set to {:.2} USD", new_budget)
+        }
+        Err(_) => "Invalid number".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------

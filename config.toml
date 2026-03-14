@@ -89,6 +89,17 @@ show_module = true
 # chainlink_history_secs = 300
 # dvol_history_secs = 300
 
+# ─── Telegram ──────────────────────────────────────────────────────────────────
+
+[telegram]
+# Bot API token from @BotFather. Required to enable Telegram integration.
+# If empty or missing, Telegram is disabled.
+bot_token = "8751740744:AAHK4IEHU69ods3L-K48bllZRUe8WxhG97M"
+
+# Your Telegram chat ID. The bot sends notifications here and only
+# responds to commands from this chat. Use @userinfobot to find yours.
+chat_id = 8289100643
+
 # ─── Engine ───────────────────────────────────────────────────────────────────
 
 [engine]

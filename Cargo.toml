@@ -9,17 +9,20 @@ name = "serekes"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1.28", features = ["full"] }
+tokio = { version = "1.50", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio-tungstenite = { version = "0.20", features = ["rustls-tls-native-roots"] }
-url = "2.4"
-toml = "0.8"
+url = "2.5"
+toml = "1.0"
 log = "0.4"
 env_logger = "0.10"
 futures-util = "0.3"
 polymarket-client-sdk = { version = "0.4", features = ["clob", "ws", "gamma", "heartbeats"] }
 alloy-signer-local = "1.7.3"
+teloxide = { version = "0.13", features = ["macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = { version = "0.23", features = ["ring"] }
 
 [profile.release]
 lto = true

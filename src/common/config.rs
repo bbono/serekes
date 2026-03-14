@@ -11,6 +11,9 @@ pub struct AppConfig {
     #[serde(default)]
     pub feeds: FeedsConfig,
     pub engine: EngineConfig,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub telegram: TelegramConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +122,29 @@ impl FeedsConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct EngineConfig {
     pub strategy: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub chat_id: i64,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            bot_token: String::new(),
+            chat_id: 0,
+        }
+    }
+}
+
+impl TelegramConfig {
+    pub fn is_enabled(&self) -> bool {
+        !self.bot_token.is_empty() && self.chat_id != 0
+    }
 }
 
 
