@@ -6,7 +6,7 @@ mod telegram;
 mod types;
 
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use polymarket_client_sdk::auth::Signer as _;
 use polymarket_client_sdk::clob::types::SignatureType;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
@@ -48,7 +48,7 @@ async fn async_main(config: AppConfig) {
     let private_key = load_private_key(&config.bot.key_file, config.bot.truncate_key_file);
     let paper_mode = private_key.is_none();
     let mode = if paper_mode { "paper" } else { "live" };
-    info!(
+    debug!(
         "Starting Serekeš [{}] | mode={}",
         market_asset.to_uppercase(),
         mode
@@ -113,7 +113,7 @@ async fn async_main(config: AppConfig) {
     if let Some(pk) = private_key {
         if let Some((client, signer)) = authenticate_client(&pk).await {
             engine.set_client(client, signer);
-            info!("Polymarket SDK authenticated.");
+            debug!("Polymarket SDK authenticated.");
         }
     }
 
@@ -147,8 +147,7 @@ async fn async_main(config: AppConfig) {
     };
 
     if let Some(signal) = signal_name {
-        info!("{} received. Shutting down gracefully...", signal);
-        info!("Shutdown complete.");
+        warn!("{} received. Shutting down.", signal);
     }
 }
 
@@ -169,7 +168,7 @@ async fn run_bot_loop(
     wait_for_feeds(engine).await;
 
     loop {
-        info!(">>>>>>>>>>>>> Entering market >>>>>>>>>>>>>");
+        debug!("Entering market");
         let mut market = discover_market(asset, interval_minutes).await;
 
         if resolve_strike_price {
@@ -177,7 +176,7 @@ async fn run_bot_loop(
                 Some((chainlink_strike, binance_strike)) => {
                     market.strike_price = chainlink_strike;
                     market.strike_price_binance = binance_strike;
-                    info!(
+                    debug!(
                         "Strike prices for market {}: chainlink={:.2} binance={:.2}",
                         market.slug, chainlink_strike, binance_strike
                     );
@@ -198,11 +197,11 @@ async fn run_bot_loop(
         trade_market(engine, &market, tick_interval_us).await;
         engine.clear_state();
         price_handle.abort();
-        info!("<<<<<<<<<<<<< Exiting market <<<<<<<<<<<<<");
+        debug!("Exiting market ");
         // Wait for another market
         let remaining_ms = market.expires_at_ms.saturating_sub(common::time::now_ms());
         if remaining_ms > 0 {
-            info!(
+            debug!(
                 "Waiting {:.1}s for market {} to end...",
                 remaining_ms as f64 / 1000.0,
                 market.slug
@@ -218,7 +217,7 @@ async fn run_bot_loop(
 // ---------------------------------------------------------------------------
 
 async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interval_us: u64) {
-    info!("--> Trading started. Market {}.", market.slug);
+    debug!("Trading started. Market {}.", market.slug);
     loop {
         if common::time::now_ms() > market.expires_at_ms + 1000 {
             break;
@@ -228,12 +227,13 @@ async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interva
 
         // If Engine completed with market processing then exit
         if result.completed {
-            info!("Result: {:?}", result);
+            // TOD
+            //warn!("Budget exhausted. Stopping market {}.", market.slug);
             break;
         }
         tokio::time::sleep(Duration::from_micros(tick_interval_us)).await;
     }
-    info!("<-- Trading completed. Market {}.", market.slug);
+    debug!("Trading completed. Market {}.", market.slug);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,9 +269,9 @@ fn load_private_key(path: &str, truncate: bool) -> Option<String> {
             } else {
                 if truncate {
                     let _ = std::fs::write(path, "");
-                    info!("Loaded private key from {} (file truncated)", path);
+                    debug!("Loaded private key from {} (file truncated)", path);
                 } else {
-                    info!("Loaded private key from {}", path);
+                    debug!("Loaded private key from {}", path);
                 }
                 Some(key)
             }
@@ -312,7 +312,7 @@ async fn authenticate_client(
 }
 
 async fn wait_for_feeds(engine: &StrategyEngine) {
-    info!("Waiting for price feeds...");
+    debug!("Waiting for price feeds...");
     loop {
         let b = engine.binance_rx.borrow().0;
         let c = engine.coinbase_rx.borrow().0;
@@ -323,5 +323,5 @@ async fn wait_for_feeds(engine: &StrategyEngine) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    info!("All feeds ready.");
+    debug!("All feeds ready.");
 }

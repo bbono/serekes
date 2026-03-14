@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info, warn};
+use log::{debug, error, warn};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
@@ -20,7 +20,7 @@ pub fn spawn_deribit_dvol_ws(
             match connect_async("wss://www.deribit.com/ws/api/v2").await {
                 Ok((mut ws_stream, _)) => {
                     attempts = 0;
-                    info!("Connected to Deribit DVOL WS");
+                    debug!("Connected to Deribit DVOL WS");
 
                     // Enable server heartbeats (every 30s) to keep connection alive
                     let heartbeat_req = serde_json::json!({

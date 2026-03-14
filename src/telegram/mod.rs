@@ -1,6 +1,6 @@
 pub mod commands;
 
-use log::{error, info, warn};
+use log::{debug, error, warn};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, ParseMode, UpdateKind};
@@ -81,7 +81,7 @@ pub fn spawn(config: &TelegramConfig, built: commands::Built) -> Telegram {
         })
         .expect("Failed to spawn Telegram thread");
 
-    info!("Telegram bot started on dedicated thread (chat_id={})", config.chat_id);
+    debug!("Telegram bot started on dedicated thread (chat_id={})", config.chat_id);
 
     Telegram { tx, bot_name }
 }

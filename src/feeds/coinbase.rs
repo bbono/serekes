@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info};
+use log::{debug, error, warn};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
@@ -14,7 +14,7 @@ pub fn spawn_coinbase_ws(asset: &str, tx: watch::Sender<(f64, i64)>) {
             match connect_async("wss://ws-feed.exchange.coinbase.com").await {
                 Ok((mut ws_stream, _)) => {
                     attempts = 0;
-                    info!("Connected to Coinbase WS");
+                    debug!("Connected to Coinbase WS");
                     let sub = serde_json::json!({
                         "type": "subscribe",
                         "product_ids": [product],
@@ -38,6 +38,7 @@ pub fn spawn_coinbase_ws(asset: &str, tx: watch::Sender<(f64, i64)>) {
                             _ => {}
                         }
                     }
+                    warn!("Coinbase WS disconnected. Reconnecting...");
                 }
                 Err(e) => {
                     let delay = backoff_secs(attempts);

@@ -20,7 +20,7 @@ pub fn store_time_offset(offset_ms: i64) {
 }
 
 pub async fn fetch_time_offset_ms() -> i64 {
-    use log::{error, info, warn};
+    use log::{debug, error, warn};
     use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 
     let clob = ClobClient::new("https://clob.polymarket.com", ClobConfig::builder().build()).unwrap();
@@ -34,7 +34,7 @@ pub async fn fetch_time_offset_ms() -> i64 {
         Ok(server_ts) => {
             let offset_ms: i64 = (server_ts * 1000) - local_ms();
             store_time_offset(offset_ms);
-            info!(
+            debug!(
                 "Time sync: server={}s local={}ms offset={}ms",
                 server_ts,
                 local_ms(),

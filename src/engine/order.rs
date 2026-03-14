@@ -1,5 +1,5 @@
 use crate::types::{OrderIntent, TokenDirection, Trade};
-use log::{error, info, warn};
+use log::{debug, error, warn};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 use polymarket_client_sdk::clob::types::{Amount, OrderStatusType, Side};
 use polymarket_client_sdk::types::{Decimal, U256};
@@ -65,7 +65,7 @@ impl StrategyEngine {
                     Ok(resp) => {
                         match &resp.status {
                             OrderStatusType::Matched => {
-                                info!("Order {} matched immediately", resp.order_id);
+                                debug!("Order {} matched immediately", resp.order_id);
                             }
                             OrderStatusType::Delayed => {
                                 warn!("Order {} delayed by matching engine", resp.order_id);
@@ -74,7 +74,7 @@ impl StrategyEngine {
                                 warn!("Order {} unmatched (placement ok, no fill)", resp.order_id);
                             }
                             OrderStatusType::Live => {
-                                info!("Order {} resting on book", resp.order_id);
+                                debug!("Order {} resting on book", resp.order_id);
                             }
                             _ => {
                                 warn!(

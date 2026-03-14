@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use log::{error, info, warn};
+use log::{debug, error, warn};
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::gamma;
 use polymarket_client_sdk::types::U256;
@@ -31,7 +31,7 @@ async fn fetch_active_market(
     interval_minutes: u32,
 ) -> Result<Market, Box<dyn std::error::Error + Send + Sync>> {
     let asset_upper = asset.to_uppercase();
-    info!("Fetching active {} market...", asset_upper);
+    debug!("Fetching active {} market...", asset_upper);
 
     let interval_ms = (interval_minutes as i64) * 60_000;
     let kline_interval = if interval_minutes >= 60 {
@@ -47,7 +47,7 @@ async fn fetch_active_market(
     for started_at_ms in [bucket_start_ms, bucket_start_ms + interval_ms] {
         let ts_secs = started_at_ms / 1000;
         let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts_secs);
-        info!(
+        debug!(
             "Discovering active {} {}m market...",
             asset_upper, interval_minutes
         );
@@ -88,7 +88,7 @@ async fn fetch_active_market(
             .and_then(|d| d.try_into().ok())
             .unwrap_or(0.0);
 
-        info!(
+        debug!(
             "Found {} {}m market {} (tick_size={} min_order_size={})",
             asset_upper, interval_minutes, slug, tick_size, min_order_size
         );
@@ -136,7 +136,7 @@ pub async fn resolve_strike_prices(
     binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     market: &Market,
 ) -> Option<(f64, f64)> {
-    info!("Searching strike prices for market {}...", market.slug);
+    debug!("Searching strike prices for market {}...", market.slug);
     let deadline_ms = market.started_at_ms + 10_000;
     let mut chainlink_strike = 0.0f64;
     let mut binance_strike = 0.0f64;
@@ -184,7 +184,7 @@ pub async fn connect_poly_price_ws(
         U256::from_str(&market.up.token_id).expect("invalid up token_id"),
         U256::from_str(&market.down.token_id).expect("invalid down token_id"),
     ];
-    info!(
+    debug!(
         "Connecting to Polymarket Price WS for market {}...",
         market.slug
     );
@@ -211,7 +211,7 @@ fn spawn_poly_price_ws(
                     continue;
                 }
             };
-            info!("Connected to Polymarket Price WS");
+            debug!("Connected to Polymarket Price WS");
             connected.notify_one();
             let mut stream = Box::pin(stream);
 

@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info};
+use log::{debug, error, warn};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
@@ -20,7 +20,7 @@ pub fn spawn_chainlink_ws(
             match connect_async("wss://ws-live-data.polymarket.com").await {
                 Ok((mut ws_stream, _)) => {
                     attempts = 0;
-                    info!("Connected to Chainlink WS");
+                    debug!("Connected to Chainlink WS");
                     let sub = serde_json::json!({
                         "action": "subscribe",
                         "subscriptions": [{
@@ -51,6 +51,7 @@ pub fn spawn_chainlink_ws(
                             _ => {}
                         }
                     }
+                    warn!("Chainlink WS disconnected. Reconnecting...");
                 }
                 Err(e) => {
                     let delay = backoff_secs(attempts);

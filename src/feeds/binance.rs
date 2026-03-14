@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info};
+use log::{debug, error, warn};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
@@ -24,7 +24,7 @@ pub fn spawn_binance_ws(
             match connect_async(&url).await {
                 Ok((ws_stream, _)) => {
                     attempts = 0;
-                    info!("Connected to Binance WS");
+                    debug!("Connected to Binance WS");
                     let (mut write, mut read) = ws_stream.split();
                     while let Some(Ok(msg)) = read.next().await {
                         match msg {
@@ -45,6 +45,7 @@ pub fn spawn_binance_ws(
                             _ => {}
                         }
                     }
+                    warn!("Binance WS disconnected. Reconnecting...");
                 }
                 Err(e) => {
                     let delay = backoff_secs(attempts);

@@ -5,7 +5,7 @@ use crate::strategy::Strategy;
 use crate::strategy::{BonoStrategy, KonzervaStrategy};
 use crate::types::{Market, TickContext, TickResult, Trade};
 use alloy_signer_local::PrivateKeySigner;
-use log::info;
+use log::debug;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::clob::Client as ClobClient;
@@ -108,9 +108,9 @@ impl StrategyEngine {
             if cost > 0.0 {
                 let mut budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
                 *budget -= cost;
-                info!("Trade (Buy) {:?} | budget={:.2}", t, *budget);
+                debug!("Trade (Buy) {:?} | budget={:.2}", t, *budget);
             } else {
-                info!("Trade (Sell) {:?}", t);
+                debug!("Trade (Sell) {:?}", t);
             }
             true
         } else {
