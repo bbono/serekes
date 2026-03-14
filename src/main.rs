@@ -207,7 +207,7 @@ async fn trade_market(engine: &mut StrategyEngine, market: &Market) {
             info!("Result: {:?}", result);
             break;
         }
-        tokio::time::sleep(Duration::from_micros(100)).await;
+        tokio::task::yield_now().await;
     }
     info!("<-- Trading completed. Market {}.", market.slug);
 }
