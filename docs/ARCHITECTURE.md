@@ -39,7 +39,8 @@ graph TD
         TG["Telegram Bot<br/>(dedicated thread)"]
         MD["Market Discovery<br/>(Gamma API)"]
         BUDGET["Budget Manager<br/>Arc&lt;Mutex&lt;f64&gt;&gt;"]
-        CFG["Config (TOML)"]
+        SECRETS["Secret Loader<br/>(load + optional truncate)"]
+        CFG["Config (flat TOML)"]
     end
 
     subgraph EXT["EXTERNAL SERVICES"]
@@ -59,7 +60,7 @@ graph TD
 
 ```mermaid
 graph LR
-    SRC["src/"] --> MAIN["main.rs<br/>Entry point: main(), runtime setup,<br/>bot loop, market rotation"]
+    SRC["src/"] --> MAIN["main.rs<br/>Entry point: main(), runtime setup,<br/>secret loading, bot loop, market rotation"]
     SRC --> COMMON["common/<br/>config.rs, logger.rs, time.rs"]
     SRC --> FEEDS["feeds/<br/>binance.rs, coinbase.rs,<br/>chainlink.rs, polymarket.rs"]
     SRC --> ENG["engine/<br/>mod.rs (StrategyEngine, snapshot)<br/>order.rs (try_order, sign+submit)"]
@@ -72,7 +73,11 @@ graph LR
 
 ### Infrastructure Layer (`main.rs` + `feeds/`)
 
-- Configurable tokio runtime (`worker_threads` in config)
+- Configurable tokio runtime (`bot_worker_threads` in config, default 2)
+- Secret loading at startup: polygon private key + telegram bot token from files
+  - `truncate_secret_files` controls whether files are emptied after reading
+  - Missing telegram token → error + exit
+  - Missing private key → PAPER mode
 - WebSocket lifecycle management (connect, reconnect, backoff)
 - Data feed parsing (Binance aggTrade, Coinbase ticker, Chainlink oracle)
 - Price history buffering (ring buffers via VecDeque, time-windowed eviction)
@@ -80,7 +85,7 @@ graph LR
 - Market discovery via Polymarket Gamma API
 - Strike price resolution from history buffers (Chainlink exact match + Binance `<=` match)
 - Time synchronization with Polymarket server
-- Configurable tick rate (`engine_ticks_per_second` in config, converted to microsecond sleep interval)
+- Configurable tick rate (`bot_engine_ticks_per_second`, converted to microsecond sleep interval)
 - Graceful shutdown (SIGINT/SIGTERM)
 
 ### Engine Layer (`engine/`, types in `types/`)
@@ -104,22 +109,22 @@ graph LR
 
 ### Support Services
 
-- **Config** (`common/config.rs`): TOML deserialization with defaults and validation
-- **Logger** (`common/logger.rs`): Configurable log formatting (timestamp, module path)
+- **Config** (`common/config.rs`): Flat TOML deserialization with defaults and validation. All keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`). Security keys (`truncate_secret_files`) have no prefix.
+- **Logger** (`common/logger.rs`): Always shows timestamp, bot name, module path, level, and message.
 - **Time** (`common/time.rs`): Server-synced `now_ms()` with Polymarket offset
 - **Types** (`types/`): Shared domain types (`Market`, `TickContext`, `TokenDirection`, `OrderIntent`, `Trade`, `Strategy` trait)
-- **Telegram** (`telegram/`): Dedicated OS thread with own tokio runtime (one bot token per instance), command routing, outbound message queue with retry, inbound long-polling with owner-only filtering
+- **Telegram** (`telegram/`): Dedicated OS thread with own tokio runtime, command routing, outbound message queue with retry, inbound long-polling with owner-only filtering by `bot_telegram_chat_id`
 - **Budget**: `Arc<Mutex<f64>>` shared between engine and Telegram commands — queryable/settable at runtime
 
 ## Concurrency Model
 
 The bot uses **Tokio** with a configurable multi-threaded runtime:
 
-- **Runtime** — `worker_threads` configurable in `[bot]` config (default 2). Tunable for CPU vs throughput tradeoff.
+- **Runtime** — `bot_worker_threads` configurable (default 2). Tunable for CPU vs throughput tradeoff.
 - **3 long-lived WS tasks** — each spawned via `tokio::spawn`, run independently with auto-reconnect
 - **1 per-market WS task** — spawned for each active market, aborted on market expiry
 - **Main task** — runs the market rotation loop synchronously (discover → tick → cleanup → repeat)
-- **Tick loop** — sleeps `1_000_000 / engine_ticks_per_second` microseconds between ticks. Default 1000 ticks/sec (1ms). Configurable in `[bot]` config.
+- **Tick loop** — sleeps `1_000_000 / bot_engine_ticks_per_second` microseconds between ticks. Default 1000 ticks/sec (1ms).
 - **Telegram thread** — dedicated OS thread with single-threaded tokio runtime, fully isolated from the engine runtime. Runs outbound message queue and inbound command polling concurrently.
 - **Communication** — `watch` channels for latest-value feeds, `Arc<Mutex<>>` for shared mutable state (market, budget)
 
@@ -156,9 +161,13 @@ flowchart LR
 
 5. **Market rotation** — The bot automatically discovers and rotates to new markets as they open, running continuously across market boundaries. Per-market state (trades, cooldowns) is cleared between rotations.
 
-6. **Telegram isolation** — Each bot instance has its own Telegram bot token and runs on a dedicated OS thread with its own single-threaded tokio runtime, preventing any Telegram latency or errors from affecting the trading engine.
+6. **Telegram isolation** — The Telegram bot runs on a dedicated OS thread with its own single-threaded tokio runtime, preventing any Telegram latency or errors from affecting the trading engine. Only messages from the configured `bot_telegram_chat_id` are processed.
 
 7. **Failed order cooldown** — After a CLOB submission failure, the engine waits 3 seconds before attempting another order, preventing rapid-fire failures.
+
+8. **Secret file truncation** — By default (`truncate_secret_files = true`), the polygon private key and telegram bot token files are emptied after reading at startup, so secrets do not remain on disk. Disabled during development for convenience.
+
+9. **Flat config** — All configuration lives in a single flat TOML file with no nested sections. Keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`), making it easy to grep and manage.
 
 ## External Dependencies
 

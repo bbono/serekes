@@ -2,17 +2,20 @@
 
 ## Startup (main.rs)
 
-1. Load `config.toml` — validate asset (btc/eth/sol/xrp), interval (5/15), worker threads, tick rate
-2. Init logger
-3. Build tokio runtime with configurable `worker_threads` (default 2)
-4. Sync server time offset with Polymarket CLOB
-5. Read wallet private key from key file (if exists)
+1. Load `config.toml` — flat config, validate all fields
+2. Init logger with `bot_name` and `logger_level`
+3. Build tokio runtime with configurable `bot_worker_threads` (default 2)
+4. Load secrets from files: polygon private key + telegram bot token
+   - If `truncate_secret_files = true`, files are emptied after reading
+   - If telegram token is missing → error + exit
+   - If private key is missing → PAPER mode (no real trades)
+5. Sync server time offset with Polymarket CLOB
 6. Spawn 3 WebSocket feed tasks (all concurrent):
    - **Binance** — `aggTrade` stream → `binance_tx` + `binance_history` (primary price oracle)
    - **Coinbase** — `ticker` stream → `coinbase_tx` (secondary oracle)
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
-7. Create shared budget (`Arc<Mutex<f64>>` from `initial_budget`)
-8. Build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`) and shared budget
+7. Create shared budget (`Arc<Mutex<f64>>` from `bot_initial_budget`)
+8. Build `StrategyEngine` with chosen strategy (`engine_strategy`) and shared budget
 9. Authenticate Polymarket SDK (if private key present → live mode)
 10. Start Telegram bot on dedicated thread — register commands, sync menu
 11. Wait for all feeds (Binance, Coinbase, Chainlink > 0) before entering main loop
@@ -20,9 +23,11 @@
 ```mermaid
 flowchart TD
     A["1. Load config.toml"] --> B["2. Init logger"]
-    B --> C["3. Build tokio runtime<br/>(worker_threads from config)"]
-    C --> D["4. Sync time with Polymarket"]
-    D --> E["5. Read wallet key"]
+    B --> C["3. Build tokio runtime<br/>(bot_worker_threads)"]
+    C --> D["4. Load secrets<br/>(private key + telegram token)<br/>truncate if configured"]
+    D --> D2{"Telegram token<br/>present?"}
+    D2 -->|no| EXIT["Error + exit"]
+    D2 -->|yes| E["5. Sync time with Polymarket"]
     E --> F["6. Spawn WS feeds (parallel)"]
     F --> F1["Binance aggTrade"]
     F --> F2["Coinbase ticker"]
@@ -46,7 +51,7 @@ flowchart TD
     Extract Up/Down token IDs + outcomes
     Extract tick_size + min_order_size"]
 
-    S2{"resolve_strike_price
+    S2{"market_resolve_strike_price
     enabled?"}
 
     S2a["② RESOLVE STRIKE PRICES
@@ -64,7 +69,7 @@ flowchart TD
     S5["⑤ TICK LOOP
     execute_tick() each iteration
     sleep(tick_interval_us) between ticks
-    Tick rate configurable via engine_ticks_per_second
+    Tick rate configurable via bot_engine_ticks_per_second
     Exits when: budget < $1 OR market expired"]
 
     S6["⑥ CLEANUP
@@ -200,7 +205,7 @@ On startup (and after each market expires):
 4. Extracts Up/Down token IDs from market outcomes (matches "UP"/"YES" and "DOWN"/"NO")
 5. Extracts `tick_size` and `min_order_size` from Gamma market metadata
 6. Creates `Market` struct with both token sides
-7. If `resolve_strike_price` is enabled:
+7. If `market_resolve_strike_price` is enabled:
    - Looks up chainlink strike from history (exact timestamp match with `started_at_ms`)
    - Looks up binance strike from history (latest price at or before `started_at_ms`)
    - Waits up to 10s for both; skips market if not found
@@ -226,11 +231,11 @@ The price WS updates incoming bid/ask directly:
 
 ## Telegram Integration
 
-Each bot instance has its own Telegram bot token (one token per instance). The Telegram bot runs on a **dedicated OS thread** with its own single-threaded tokio runtime, fully isolated from the main engine runtime.
+The Telegram bot runs on a **dedicated OS thread** with its own single-threaded tokio runtime, fully isolated from the main engine runtime. Only messages from the configured `bot_telegram_chat_id` are processed — all others are silently ignored.
 
 ### Architecture
 - **Outbound**: Messages sent via `Telegram.send()` → unbounded mpsc channel → outbound loop with 3 retry attempts (MarkdownV2 format)
-- **Inbound**: Long-polling loop (`getUpdates`) → owner-only filtering by `chat_id` → command dispatch
+- **Inbound**: Long-polling loop (`getUpdates`) → owner-only filtering by `bot_telegram_chat_id` → command dispatch
 - **Commands**: Simple routing (`/command`) with auto-synced bot menu
 
 ### Registered Commands
@@ -238,35 +243,35 @@ Each bot instance has its own Telegram bot token (one token per instance). The T
 
 ## Config Structure
 
+Flat TOML file with prefixed keys — no nested sections:
+
 ```toml
-[bot]
-name = "bono"                         # Bot instance name (required)
-key_file = ".key"                     # Path to Polygon private key file
-                                      # Key present → LIVE mode, absent → PAPER mode
-truncate_key_file = true              # Erase key file after reading
-worker_threads = 2                    # Tokio runtime worker threads (1–16)
-engine_ticks_per_second = 1000        # Trading loop tick rate (default 1000 = 1ms)
-initial_budget = 4.00                 # USDC budget per bot instance
+# Security
+truncate_secret_files = true              # Empty secret files after reading (default: true)
+bot_polygon_private_key_file = ".key"     # Polygon wallet key file (missing = PAPER mode)
+bot_telegram_bot_token_file = ".tg-token" # Telegram bot token file (required)
 
-[market]
-asset = "btc"                         # btc/eth/sol/xrp
-interval_minutes = 5                  # 5 or 15
-resolve_strike_price = true           # Wait for Chainlink/Binance strike before trading
+# Bot
+bot_name = "bono"                         # Bot instance name (required)
+bot_initial_budget = 4.00                 # USDC budget per instance
+bot_telegram_chat_id = 8289100643         # Owner's Telegram chat ID (required)
+bot_worker_threads = 2                    # Tokio runtime worker threads (1–16)
+bot_engine_ticks_per_second = 1000        # Trading loop tick rate
 
-[logger]
-level = "info"                        # error/warn/info/debug/trace (comma-separated per-module)
-show_timestamp = true
-show_module = true
+# Engine
+engine_strategy = "bono"                  # Trading strategy: bono, konzerva (required)
 
-[feeds]
-# binance_history_secs = 300          # Rolling price history window (default: interval * 60)
-# chainlink_history_secs = 300
-[telegram]
-bot_token = ""                        # Bot API token from @BotFather (empty = disabled)
-chat_id = 0                           # Owner's Telegram chat ID
+# Market
+market_asset = "btc"                      # btc/eth/sol/xrp
+market_interval_minutes = 5              # 5 or 15
+market_resolve_strike_price = true        # Wait for strike before trading
 
-[engine]
-strategy = "bono"                     # Trading strategy: bono, konzerva
+# Logger
+logger_level = "info"                     # error/warn/info/debug/trace
+
+# Feeds
+# feeds_binance_history_secs = 300        # Rolling history window (default: interval * 60)
+# feeds_chainlink_history_secs = 300
 ```
 
 ## Graceful Shutdown
