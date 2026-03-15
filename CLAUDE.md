@@ -3,6 +3,7 @@
 ## Architecture Principles
 - Always separate business logic from infrastructure logic
 - All timestamps must be in millisecond precision; convert any non-ms timestamps to ms
+- Always use **Hexagonal Architecture (ports & adapters)** design principles when introducing changes to code
 
 ## Project Structure
 - Bot source code: `./src/`
