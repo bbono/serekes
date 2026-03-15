@@ -6,7 +6,7 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatId, ParseMode, UpdateKind};
 use tokio::sync::mpsc;
 
-use crate::common::config::TelegramConfig;
+
 
 /// Callback type for handling incoming commands.
 /// Receives (command, args) and returns an optional reply string.
@@ -26,16 +26,18 @@ impl Telegram {
 
 /// Spawns the Telegram bot on a dedicated OS thread with its own tokio runtime,
 /// fully isolated from the main engine runtime.
-pub fn spawn(config: &TelegramConfig, built: commands::Built) -> Telegram {
+pub fn spawn(bot_token: Option<String>, chat_id: i64, built: commands::Built) -> Telegram {
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
-    if !config.is_enabled() {
-        warn!("Telegram disabled (missing bot_token or chat_id)");
-        return Telegram { tx };
-    }
+    let bot_token = match bot_token {
+        Some(token) if chat_id != 0 => token,
+        _ => {
+            warn!("Telegram disabled (missing bot token or chat_id)");
+            return Telegram { tx };
+        }
+    };
 
-    let bot_token = config.bot_token.clone();
-    let chat_id = ChatId(config.chat_id);
+    let chat_id = ChatId(chat_id);
 
     std::thread::Builder::new()
         .name("telegram".into())
@@ -69,7 +71,7 @@ pub fn spawn(config: &TelegramConfig, built: commands::Built) -> Telegram {
         })
         .expect("Failed to spawn Telegram thread");
 
-    debug!("Telegram bot started on dedicated thread (chat_id={})", config.chat_id);
+    debug!("Telegram bot started on dedicated thread (chat_id={})", chat_id);
 
     Telegram { tx }
 }

@@ -7,3 +7,4 @@ target/
 
 .lock
 .key
+.tg-token

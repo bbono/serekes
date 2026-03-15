@@ -12,26 +12,19 @@ pub struct AppConfig {
     pub feeds: FeedsConfig,
     pub engine: EngineConfig,
     #[serde(default)]
-    #[allow(dead_code)]
-    pub telegram: TelegramConfig,
+    pub environment: EnvironmentConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggerConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
-    #[serde(default = "default_show_timestamp")]
-    pub show_timestamp: bool,
-    #[serde(default = "default_show_module")]
-    pub show_module: bool,
 }
 
 impl Default for LoggerConfig {
     fn default() -> Self {
         Self {
             level: default_log_level(),
-            show_timestamp: default_show_timestamp(),
-            show_module: default_show_module(),
         }
     }
 }
@@ -49,18 +42,51 @@ pub struct BotConfig {
     pub key_file: String,
     #[serde(default)]
     pub initial_budget: f64,
-    #[serde(default = "default_true")]
-    pub truncate_key_file: bool,
     #[serde(default = "default_worker_threads")]
     pub worker_threads: usize,
     #[serde(default = "default_engine_ticks_per_second")]
     pub engine_ticks_per_second: u32,
+    #[serde(default = "default_bot_token_file")]
+    pub telegram_bot_token_file: String,
+    #[serde(default)]
+    pub telegram_chat_id: i64,
 }
 
 impl BotConfig {
     /// Tick interval in microseconds, computed from engine_ticks_per_second.
     pub fn tick_interval_us(&self) -> u64 {
         1_000_000 / self.engine_ticks_per_second as u64
+    }
+
+    /// Load all secrets from their files. Returns (private_key, telegram_token).
+    /// When `truncate` is true, files are emptied after reading.
+    pub fn load_secrets(&self, truncate: bool) -> (Option<String>, Option<String>) {
+        let private_key = load_secret_file(&self.key_file, truncate);
+        let tg_token = load_secret_file(&self.telegram_bot_token_file, truncate);
+        (private_key, tg_token)
+    }
+}
+
+fn load_secret_file(path: &str, truncate: bool) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let value = contents.trim().to_string();
+            if value.is_empty() {
+                None
+            } else {
+                if truncate {
+                    let _ = std::fs::write(path, "");
+                    log::debug!("Loaded secret from {} (file truncated)", path);
+                } else {
+                    log::debug!("Loaded secret from {}", path);
+                }
+                Some(value)
+            }
+        }
+        Err(_) => {
+            log::debug!("Secret file not found: {}", path);
+            None
+        }
     }
 }
 
@@ -118,33 +144,27 @@ pub struct EngineConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct TelegramConfig {
-    #[serde(default)]
-    pub bot_token: String,
-    #[serde(default)]
-    pub chat_id: i64,
+pub struct EnvironmentConfig {
+    #[serde(default = "default_true")]
+    pub dev: bool,
 }
 
-impl Default for TelegramConfig {
+impl Default for EnvironmentConfig {
     fn default() -> Self {
-        Self {
-            bot_token: String::new(),
-            chat_id: 0,
-        }
+        Self { dev: true }
     }
 }
 
-impl TelegramConfig {
-    pub fn is_enabled(&self) -> bool {
-        !self.bot_token.is_empty() && self.chat_id != 0
+impl EnvironmentConfig {
+    pub fn is_dev(&self) -> bool {
+        self.dev
     }
 }
 
+fn default_bot_token_file() -> String { ".tg-token".to_string() }
 
 fn default_key_file() -> String { ".key".to_string() }
 fn default_log_level() -> String { "info".to_string() }
-fn default_show_timestamp() -> bool { true }
-fn default_show_module() -> bool { true }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
 fn default_worker_threads() -> usize { 2 }

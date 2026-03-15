@@ -45,7 +45,12 @@ fn main() {
 async fn async_main(config: AppConfig) {
 
     let market_asset = config.market.asset.to_lowercase();
-    let private_key = load_private_key(&config.bot.key_file, config.bot.truncate_key_file);
+    let truncate = !config.environment.is_dev();
+    let (private_key, tg_token) = config.bot.load_secrets(truncate);
+    if tg_token.is_none() {
+        error!("Telegram bot token file '{}' is missing or empty", config.bot.telegram_bot_token_file);
+        std::process::exit(1);
+    }
     let paper_mode = private_key.is_none();
     let mode = if paper_mode { "paper" } else { "live" };
     debug!("Starting asset={} mode={}", market_asset.to_uppercase(), mode);
@@ -106,7 +111,7 @@ async fn async_main(config: AppConfig) {
     let mut cmds = telegram::commands::Commands::new();
     let budget_ref = budget.clone();
     cmds.register("budget", "Budget", move |args| bot_budget_command(&budget_ref, args));
-    let tg = telegram::spawn(&config.telegram, cmds.build());
+    let tg = telegram::spawn(tg_token, config.bot.telegram_chat_id, cmds.build());
     tg.send(format!("{} started.", config.bot.name));
 
     // --- Graceful shutdown ---
@@ -243,28 +248,6 @@ fn bot_budget_command(budget: &Arc<Mutex<f64>>, args: &str) -> String {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn load_private_key(path: &str, truncate: bool) -> Option<String> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            let key = contents.trim().to_string();
-            if key.is_empty() {
-                None
-            } else {
-                if truncate {
-                    let _ = std::fs::write(path, "");
-                    debug!("Loaded private key from {} (file truncated)", path);
-                } else {
-                    debug!("Loaded private key from {}", path);
-                }
-                Some(key)
-            }
-        }
-        Err(_) => {
-            debug!("Key file not found: {}", path);
-            None
-        }
-    }
-}
 
 async fn authenticate_client(
     private_key: &str,

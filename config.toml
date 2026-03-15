@@ -1,3 +1,10 @@
+# ─── Environment ──────────────────────────────────────────────────────────────
+
+[environment]
+# Whether the bot runs in development mode.
+# Default: true
+dev = true
+
 # ─── Bot ─────────────────────────────────────────────────────────────
 
 [bot]
@@ -11,11 +18,6 @@ name = "bono"
 # If the file is missing or empty → bot runs in PAPER mode (simulated fills).
 # Default: ".key"
 key_file = ".key"
-
-# Whether to empty the key file after reading the private key,
-# so the key doesn't remain on disk.
-# Default: true
-truncate_key_file = true
 
 # Number of tokio runtime worker threads.
 # More threads help under heavy WebSocket load; fewer threads save CPU.
@@ -31,6 +33,15 @@ engine_ticks_per_second = 1000
 # Starting budget in USDC for this bot instance.
 # Default: 0.00
 initial_budget = 4.00
+
+# Path to a file containing the Telegram Bot API token from @BotFather.
+# If the file is missing or empty, Telegram is disabled.
+# Default: ".tg-token"
+telegram_bot_token_file = ".tg-token"
+
+# Your Telegram chat ID. The bot sends notifications here and only
+# responds to commands from this chat. Use @userinfobot to find yours.
+telegram_chat_id = 8289100643
 
 # ─── Market ───────────────────────────────────────────────────────────────────
 
@@ -70,14 +81,6 @@ resolve_strike_price = false
 # Default: "info"
 level = "info"
 
-# Whether to show timestamps in log output.
-# Default: true
-show_timestamp = true
-
-# Whether to show the source module path in log output.
-# Default: true
-show_module = true
-
 # ─── Feeds ─────────────────────────────────────────────────────────────────────
 
 [feeds]
@@ -87,17 +90,6 @@ show_module = true
 # When not set, each defaults to the market window (interval_minutes * 60).
 # binance_history_secs = 300
 # chainlink_history_secs = 300
-
-# ─── Telegram ──────────────────────────────────────────────────────────────────
-
-[telegram]
-# Bot API token from @BotFather. Required to enable Telegram integration.
-# If empty or missing, Telegram is disabled.
-bot_token = "8751740744:AAHK4IEHU69ods3L-K48bllZRUe8WxhG97M"
-
-# Your Telegram chat ID. The bot sends notifications here and only
-# responds to commands from this chat. Use @userinfobot to find yours.
-chat_id = 8289100643
 
 # ─── Engine ───────────────────────────────────────────────────────────────────
 
