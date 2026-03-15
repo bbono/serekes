@@ -1,13 +1,12 @@
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::{Market, Trade};
 
 /// Snapshot of all market state passed to strategy on every engine tick (1ms loop).
 ///
-/// The engine builds this from its WebSocket data feeds, shared market state,
-/// and risk monitors, so the strategy never touches raw watch receivers or
-/// infrastructure. All fields are copied values — no references, no async, pure data.
+/// The engine builds this from its port adapters and internal state,
+/// so the strategy never touches infrastructure. All fields are copied
+/// values — no references, no async, pure data.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct TickContext {
@@ -33,14 +32,6 @@ pub struct TickContext {
     /// None if no market has been discovered yet.
     /// Wrapped in Arc to avoid cloning the full Market struct every tick.
     pub market: Option<Arc<Market>>,
-
-    /// Recent binance price history: (price, timestamp_ms), oldest first.
-    /// Lock only when needed — avoid holding across await points.
-    pub binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-
-    /// Recent chainlink price history: (price, timestamp_ms), oldest first.
-    /// Lock only when needed — avoid holding across await points.
-    pub chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 
     /// All trades placed by the engine during this market, oldest first.
     pub trades: Vec<Trade>,

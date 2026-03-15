@@ -1,17 +1,16 @@
-mod binance;
-mod chainlink;
-mod coinbase;
+pub mod binance;
+pub mod chainlink;
+pub mod clock;
+pub mod coinbase;
 pub mod notion;
-pub mod polymarket;
+pub mod polymarket_discovery;
+pub mod polymarket_order;
+pub mod polymarket_price;
+pub mod resolver;
 pub mod telegram;
 
-pub use binance::spawn_binance_ws;
-pub use chainlink::spawn_chainlink_ws;
-pub use coinbase::spawn_coinbase_ws;
-pub use polymarket::{connect_poly_price_ws, discover_market};
-
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 fn backoff_secs(attempt: u32) -> u64 {
     (5u64 << attempt.min(4)).min(60)
@@ -30,10 +29,11 @@ fn parse_json(text: &str) -> Option<serde_json::Value> {
     serde_json::from_str(text).ok()
 }
 
-/// Look up a price from a history buffer by timestamp.
-/// If `exact` is true, requires an exact timestamp match;
-/// otherwise returns the latest price at or before `target_ms`.
-pub fn lookup_history(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, target_ms: i64, exact: bool) -> f64 {
+fn lookup_history_impl(
+    history: &Mutex<VecDeque<(f64, i64)>>,
+    target_ms: i64,
+    exact: bool,
+) -> f64 {
     let hist = history.lock().unwrap_or_else(|e| e.into_inner());
     hist.iter()
         .rev()

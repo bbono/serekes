@@ -10,7 +10,7 @@ pub enum TokenDirection {
 
 /// Everything the engine needs to submit an order to the CLOB.
 /// The strategy fully configures this; the engine only adds `token_id`
-/// (from direction routing) and calls `.build().await`.
+/// (from direction routing) and calls the exchange port.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum OrderIntent {

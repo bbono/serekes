@@ -4,8 +4,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 
-use crate::integrations::notion::NotionApi;
-use crate::types::Market;
+use super::notion::NotionApi;
+use crate::domain::Market;
 
 const GAMMA_API_BASE: &str = "https://gamma-api.polymarket.com";
 const REQUEST_DELAY_SECS: u64 = 1;
@@ -43,13 +43,24 @@ impl Resolver {
             None => return,
         };
 
-        debug!("Resolver found {} completed records to check", records.len());
+        debug!(
+            "Resolver found {} completed records to check",
+            records.len()
+        );
 
         for record in &records {
             if let Some(outcome) = self.check_resolution(&record.slug).await {
-                let pnl = Market::compute_pnl(&outcome, record.shares_up, record.shares_down, record.cost);
+                let pnl = Market::compute_pnl(
+                    &outcome,
+                    record.shares_up,
+                    record.shares_down,
+                    record.cost,
+                );
                 let pnl_str = format!("{:.2}", pnl);
-                debug!("Market {} resolved: {} pnl={}", record.slug, outcome, pnl_str);
+                debug!(
+                    "Market {} resolved: {} pnl={}",
+                    record.slug, outcome, pnl_str
+                );
 
                 let props = HashMap::from([
                     ("status".to_string(), "resolved".to_string()),

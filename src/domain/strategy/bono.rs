@@ -1,5 +1,5 @@
 use super::Strategy;
-use crate::types::{OrderIntent, TickContext, TokenDirection};
+use crate::domain::{OrderIntent, TickContext, TokenDirection};
 use polymarket_client_sdk::clob::types::{OrderType, Side};
 use polymarket_client_sdk::types::Decimal;
 
@@ -15,7 +15,7 @@ impl Strategy for BonoStrategy {
     fn create_order(&self, ctx: &TickContext) -> Option<(TokenDirection, OrderIntent)> {
         let market = ctx.market.as_ref()?;
 
-        if market.time_to_expire_ms() > 200_000 {
+        if market.time_to_expire_ms(ctx.polymarket_now_ms) > 200_000 {
             return None;
         }
 

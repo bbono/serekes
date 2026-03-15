@@ -2,140 +2,217 @@
 
 ## Overview
 
-Serekes is a Rust trading bot that trades binary Up/Down prediction markets on Polymarket, using real-time price data from multiple exchanges to inform trading decisions. It follows a **separation of business logic from infrastructure** — strategies contain only trading decisions, while the engine handles all I/O, state management, and order execution.
+Serekes is a Rust trading bot that trades binary Up/Down prediction markets on Polymarket, using real-time price data from multiple exchanges to inform trading decisions. It follows **Hexagonal Architecture (ports & adapters)** — the core domain and engine depend only on trait-based port interfaces, while all external services are encapsulated in adapter implementations. Strategies contain only trading decisions (pure functions), and all I/O is handled by adapters injected at startup.
 
 ## Architecture Diagram
 
 ```mermaid
-graph TD
-    subgraph INTEGRATIONS["INTEGRATIONS LAYER"]
-        BIN_WS["Binance WS<br/>(aggTrade)"]
-        CB_WS["Coinbase WS<br/>(ticker)"]
-        CL_WS["Chainlink WS<br/>(oracle)"]
-        PM_WS["Polymarket<br/>Price WS"]
-        SYNC["Time Sync<br/>(CLOB server)"]
-        CHANNELS["tokio::sync::watch channels<br/>Arc&lt;Mutex&lt;VecDeque&gt;&gt; histories<br/>Arc&lt;Mutex&lt;Option&lt;Arc&lt;Market&gt;&gt;&gt;&gt; shared state"]
-        TG["Telegram Bot<br/>(dedicated thread)"]
-        NOTION["Notion<br/>(background worker)"]
-        RESOLVER["Polymarket Resolver<br/>(background task)"]
+graph TB
+    subgraph DRIVING["DRIVING ADAPTERS (Left Side)"]
+        TEL_IN["Telegram Commands<br/>(Inbound Adapter)"]
     end
 
-    BIN_WS & CB_WS & CL_WS & PM_WS & SYNC --> CHANNELS
+    subgraph HEXAGON["CORE HEXAGON"]
+        subgraph PORTS_IN["Inbound Ports"]
+            P_CMD["bot_budget_command()"]
+        end
 
-    subgraph ENGINE["ENGINE LAYER"]
-        RUN["engine.run()<br/>• market rotation loop<br/>• feed readiness<br/>• tick loop"]
-        SE["StrategyEngine<br/>• execute_tick<br/>• snapshot()<br/>• budget tracking<br/>• SDK authentication"]
-        OE["Order Execution<br/>• sign+submit<br/>• Limit/Market<br/>• cooldown"]
-        STRIKE["Strike Resolution<br/>• exact (Chainlink)<br/>• at-or-before (Binance)"]
-        TRAIT["Strategy Trait<br/>create_order(ctx) → Option&lt;Direction, OrderIntent&gt;"]
-        RUN --> SE
-        SE --> TRAIT
+        subgraph APP["Application Service"]
+            ENGINE["StrategyEngine<br/>• execute_tick<br/>• snapshot<br/>• resolve_strike_prices<br/>• trade_market / run"]
+        end
+
+        subgraph DOMAIN["Domain Model"]
+            MARKET["Market"]
+            ORDER["OrderIntent / Trade"]
+            TICK["TickContext"]
+            SUMMARY["MarketSummary"]
+            STRAT_TRAIT["Strategy trait"]
+            BONO["BonoStrategy"]
+            KONZ["KonzervaStrategy"]
+        end
+
+        subgraph PORTS_OUT["Outbound Ports (traits)"]
+            P_FEED["PriceFeedPort"]
+            P_MPRICE["MarketPricePort"]
+            P_EXCHANGE["ExchangePort"]
+            P_DISCOVERY["MarketDiscoveryPort"]
+            P_PERSIST["PersistencePort"]
+            P_NOTIFY["NotificationPort"]
+            P_CLOCK["ClockPort"]
+        end
     end
 
-    CHANNELS --> ENGINE
-
-    subgraph BIZ["BUSINESS LOGIC LAYER"]
-        BONO["BonoStrategy<br/>• last-30s entry<br/>• buy higher ask (0.85–0.97)<br/>• FOK market order"]
-        KONZ["KonzervaStrategy<br/>• placeholder (no-op)"]
-    end
-
-    TRAIT --> BIZ
-
-    subgraph SUPPORT["SUPPORT SERVICES"]
-        BUDGET["Budget Manager<br/>Arc&lt;Mutex&lt;f64&gt;&gt;"]
-        SECRETS["Secret Loader<br/>(load + optional truncate)"]
-        CFG["Config (flat TOML)"]
+    subgraph DRIVEN["DRIVEN ADAPTERS (Right Side)"]
+        A_BIN["BinanceAdapter"]
+        A_CB["CoinbaseAdapter"]
+        A_CL["ChainlinkAdapter"]
+        A_PP["PolymarketPriceAdapter"]
+        A_PO["PolymarketOrderAdapter"]
+        A_PD["GammaDiscoveryAdapter"]
+        A_TG["TelegramAdapter"]
+        A_NOT["NotionAdapter"]
+        A_CLK["PolymarketClock"]
+        A_RES["Resolver"]
     end
 
     subgraph EXT["EXTERNAL SERVICES"]
-        E_BIN["Binance<br/>WS + API"]
-        E_CB["Coinbase<br/>WS"]
-        E_PM["Polymarket<br/>CLOB+Gamma"]
-        E_TG["Telegram<br/>Bot API"]
-        E_NOTION["Notion<br/>API"]
+        E_BIN["Binance WS"]
+        E_CB["Coinbase WS"]
+        E_CL["Chainlink WS"]
+        E_PM["Polymarket CLOB+Gamma"]
+        E_TG["Telegram Bot API"]
+        E_NOTION["Notion API"]
     end
 
-    E_BIN --> BIN_WS
-    E_CB --> CB_WS
-    E_PM --> PM_WS
-    E_PM --> RESOLVER
-    E_TG --> TG
-    E_NOTION --> NOTION
-    E_NOTION --> RESOLVER
+    TEL_IN --> P_CMD --> ENGINE
+    ENGINE --> STRAT_TRAIT --> BONO & KONZ
+    ENGINE --> MARKET & ORDER & TICK & SUMMARY
+
+    ENGINE --> P_FEED & P_MPRICE & P_EXCHANGE & P_DISCOVERY & P_PERSIST & P_CLOCK
+
+    P_FEED --> A_BIN & A_CB & A_CL
+    P_MPRICE --> A_PP
+    P_EXCHANGE --> A_PO
+    P_DISCOVERY --> A_PD
+    P_PERSIST --> A_NOT
+    P_NOTIFY --> A_TG
+    P_CLOCK --> A_CLK
+
+    A_BIN --> E_BIN
+    A_CB --> E_CB
+    A_CL --> E_CL
+    A_PP & A_PO & A_PD --> E_PM
+    A_TG --> E_TG
+    A_NOT & A_RES --> E_NOTION
+    A_RES --> E_PM
 ```
+
+## Dependency Rule
+
+```mermaid
+graph LR
+    subgraph "Dependencies always point INWARD"
+        ADAPTERS["adapters/"] -->|implements| PORTS["ports/"]
+        PORTS -->|uses| DOMAIN["domain/"]
+        ENGINE["engine/"] -->|uses| PORTS
+        ENGINE -->|uses| DOMAIN
+        MAIN["main.rs"] -->|wires| ADAPTERS
+        MAIN -->|wires| ENGINE
+    end
+
+    style DOMAIN fill:#2d5,stroke:#333,color:#000
+    style PORTS fill:#5ad,stroke:#333,color:#000
+    style ENGINE fill:#fa5,stroke:#333,color:#000
+    style ADAPTERS fill:#f55,stroke:#333,color:#000
+    style MAIN fill:#999,stroke:#333,color:#000
+```
+
+**The golden rule**: `domain/` and `ports/` NEVER import from `adapters/` or `engine/`. Dependencies always point inward toward the domain.
 
 ## Module Structure
 
 ```mermaid
 graph LR
-    SRC["src/"] --> MAIN["main.rs<br/>Entry point: runtime setup,<br/>integration wiring, shutdown"]
-    SRC --> COMMON["common/<br/>config.rs, logger.rs, time.rs"]
-    SRC --> INT["integrations/<br/>mod.rs (re-exports + shared helpers)"]
-    INT --> BIN["binance.rs"]
-    INT --> CB["coinbase.rs"]
-    INT --> CL["chainlink.rs"]
-    INT --> PM["polymarket/<br/>discovery.rs, price_ws.rs, resolver.rs"]
-    INT --> TG["telegram.rs<br/>(bot, commands, outbound/inbound)"]
-    INT --> NOTION["notion.rs<br/>(save worker, upsert)"]
-    SRC --> ENG["engine/<br/>mod.rs (StrategyEngine, snapshot, auth)<br/>run.rs (market loop, tick loop)<br/>order.rs (try_order, sign+submit)"]
-    SRC --> STRAT["strategy/<br/>mod.rs, bono.rs, konzerva.rs"]
-    SRC --> TYP["types/<br/>market.rs, tick_context.rs, order.rs, summary.rs<br/>Domain types + Strategy trait"]
+    SRC["src/"] --> MAIN["main.rs<br/>Composition root:<br/>wires adapters → ports → engine"]
+    SRC --> COMMON["common/<br/>config.rs, logger.rs"]
+
+    SRC --> DOMAIN_DIR["domain/"]
+    DOMAIN_DIR --> D_MARKET["market.rs"]
+    DOMAIN_DIR --> D_ORDER["order.rs"]
+    DOMAIN_DIR --> D_TICK["tick_context.rs"]
+    DOMAIN_DIR --> D_SUMMARY["summary.rs"]
+    DOMAIN_DIR --> D_STRAT["strategy/<br/>mod.rs (trait), bono.rs, konzerva.rs"]
+
+    SRC --> PORTS_DIR["ports/"]
+    PORTS_DIR --> P_CLK["clock.rs"]
+    PORTS_DIR --> P_PF["price_feed.rs"]
+    PORTS_DIR --> P_MP["market_price.rs"]
+    PORTS_DIR --> P_EX["exchange.rs"]
+    PORTS_DIR --> P_MD["market_discovery.rs"]
+    PORTS_DIR --> P_PER["persistence.rs"]
+    PORTS_DIR --> P_NTF["notification.rs"]
+
+    SRC --> ADAPT_DIR["adapters/"]
+    ADAPT_DIR --> A_CLK2["clock.rs (PolymarketClock)"]
+    ADAPT_DIR --> A_BIN2["binance.rs (BinanceAdapter)"]
+    ADAPT_DIR --> A_CB2["coinbase.rs (CoinbaseAdapter)"]
+    ADAPT_DIR --> A_CL2["chainlink.rs (ChainlinkAdapter)"]
+    ADAPT_DIR --> A_PP2["polymarket_price.rs"]
+    ADAPT_DIR --> A_PO2["polymarket_order.rs"]
+    ADAPT_DIR --> A_PD2["polymarket_discovery.rs"]
+    ADAPT_DIR --> A_TG2["telegram.rs"]
+    ADAPT_DIR --> A_NOT2["notion.rs"]
+    ADAPT_DIR --> A_RES2["resolver.rs"]
+
+    SRC --> ENG_DIR["engine/<br/>mod.rs (StrategyEngine)<br/>run.rs (market loop)<br/>order.rs (order pipeline)"]
 ```
 
 ## Layer Responsibilities
 
-### main.rs (startup wiring)
+### main.rs (Composition Root)
 
 - Loads config and secrets, initializes logger
-- Builds tokio runtime, syncs time with Polymarket
-- Spawns integrations (price feeds, Telegram, Notion, resolver)
-- Creates `StrategyEngine`, authenticates SDK, calls `engine.run()`
-- Handles graceful shutdown (SIGINT/SIGTERM)
+- Builds tokio runtime
+- Creates all adapters (clock, price feeds, exchange, discovery, persistence, notifications)
+- Injects adapters into `StrategyEngine` via port traits
+- Calls `engine.run()`, handles graceful shutdown (SIGINT/SIGTERM)
+- Contains the Telegram `/budget` command handler (inbound adapter glue)
 
-### Integrations Layer (`integrations/`)
+### Domain Layer (`domain/`)
 
-- **Binance** (`binance.rs`): aggTrade WebSocket, price history buffering
-- **Coinbase** (`coinbase.rs`): ticker WebSocket
-- **Chainlink** (`chainlink.rs`): Polymarket live-data WS, oracle price history
-- **Polymarket** (`polymarket/`):
-  - `discovery.rs`: market discovery (Gamma API fetch + retry)
-  - `price_ws.rs`: per-market bid/ask WebSocket
-  - `resolver.rs`: background market resolution checker
-- **Telegram** (`telegram.rs`): dedicated OS thread with own tokio runtime, outbound message queue with retry, inbound long-polling with owner-only filtering, command registration and routing
-- **Notion** (`notion.rs`): background save worker via mpsc channel, upsert by Name, auto-populates created/updated dates and market URL
+Pure domain model with **zero infrastructure dependencies**:
 
-Shared helpers in `mod.rs`: exponential backoff, price history push, JSON parsing, generic `lookup_history`.
+- **Market** (`market.rs`): Binary market metadata + domain rules (slug construction, time bucketing, PnL computation). Time methods take `now_ms` parameter — no global state.
+- **TickContext** (`tick_context.rs`): Read-only snapshot of all feeds passed to strategy each tick. Pure data — no channels, no mutexes.
+- **OrderIntent / Trade** (`order.rs`): Strategy's order decision (Limit or Market) and executed trade record.
+- **MarketSummary** (`summary.rs`): Summary of a completed market session.
+- **Strategy trait** (`strategy/mod.rs`): `create_order(ctx) → Option<(Direction, OrderIntent)>` — pure decision function.
+- **BonoStrategy** (`strategy/bono.rs`): Entry-only strategy, buys higher ask within 200s of expiry.
+- **KonzervaStrategy** (`strategy/konzerva.rs`): Placeholder no-op strategy.
+
+### Ports Layer (`ports/`)
+
+Trait definitions that form the boundary between the core and the outside world:
+
+| Port | Trait | Methods |
+|------|-------|---------|
+| Clock | `ClockPort` | `now_ms()` |
+| Price Feed | `PriceFeedPort` | `latest()`, `is_ready()`, `lookup_history()` |
+| Market Price | `MarketPricePort` | `connect()`, `current_market()`, `disconnect()` |
+| Exchange | `ExchangePort` | `submit_order()`, `is_paper_mode()` |
+| Market Discovery | `MarketDiscoveryPort` | `discover()` |
+| Persistence | `PersistencePort` | `save()` |
+| Notification | `NotificationPort` | `send()` |
 
 ### Engine Layer (`engine/`)
 
-- `mod.rs`: `StrategyEngine` struct, snapshot construction, SDK authentication, strike price resolution, tick execution
-- `run.rs`: market rotation loop (discover → resolve → trade → cleanup), tick loop, feed readiness wait
-- `order.rs`: order placement pipeline (budget check → min size → cooldown → sign+submit), fill price resolution
+Application service that orchestrates trading using **only port traits**:
 
-All engine fields are private — the only public API is `new()`, `authenticate()`, and `run()`.
+- `mod.rs`: `StrategyEngine` struct holding `Arc<dyn Port>` references, snapshot construction, strike resolution, tick execution
+- `run.rs`: Market rotation loop (discover → resolve → trade → cleanup), tick loop, feed readiness wait
+- `order.rs`: Order placement pipeline (budget check → min size → cooldown → exchange port → fill resolution)
 
-### Business Logic Layer (`strategy/`)
+All engine fields are private — the only public API is `new()` and `run()`.
 
-- Pure trading logic — no I/O, no async, no infrastructure
-- Receives `TickContext` (read-only market snapshot including trade history)
-- Returns `Option<(TokenDirection, OrderIntent)>` — the engine handles everything else
-- Pluggable via the `Strategy` trait
+### Adapters Layer (`adapters/`)
 
-### Domain Types (`types/`)
+Concrete implementations of port traits, containing all infrastructure details:
 
-- `Market`: binary market metadata + domain rules (slug construction, time bucketing, PnL computation)
-- `TickContext`: read-only snapshot of all feeds passed to strategy each tick
-- `TickResult`: outcome of a single tick
-- `MarketSummary`: summary of a completed market session (trades, cost, shares)
-- `OrderIntent`: strategy's order decision (Limit or Market)
-- `TokenDirection`: Up or Down
-- `Trade`: executed trade record
+- **PolymarketClock** (`clock.rs`): Server-synced time via Polymarket CLOB. Implements `ClockPort`.
+- **BinanceAdapter** (`binance.rs`): aggTrade WebSocket + price history. Implements `PriceFeedPort`.
+- **CoinbaseAdapter** (`coinbase.rs`): ticker WebSocket. Implements `PriceFeedPort`.
+- **ChainlinkAdapter** (`chainlink.rs`): Polymarket live-data WS + oracle history. Implements `PriceFeedPort`.
+- **PolymarketPriceAdapter** (`polymarket_price.rs`): Per-market bid/ask WS. Implements `MarketPricePort`.
+- **PolymarketOrderAdapter** (`polymarket_order.rs`): SDK auth + order signing + CLOB submission. Implements `ExchangePort`.
+- **GammaDiscoveryAdapter** (`polymarket_discovery.rs`): Gamma API market discovery. Implements `MarketDiscoveryPort`.
+- **NotionAdapter** (`notion.rs`): Non-blocking save via mpsc worker. Implements `PersistencePort`.
+- **TelegramAdapter** (`telegram.rs`): Dedicated OS thread, command routing, outbound queue. Implements `NotificationPort`.
+- **Resolver** (`resolver.rs`): Background task polling for market resolutions via Gamma API.
 
 ### Support Services (`common/`)
 
 - **Config** (`config.rs`): Flat TOML deserialization with defaults and validation
 - **Logger** (`logger.rs`): Timestamp + bot name + module path + colored level + message
-- **Time** (`time.rs`): Server-synced `now_ms()` with Polymarket offset
 
 ## Concurrency Model
 
@@ -149,57 +226,57 @@ The bot uses **Tokio** with a configurable multi-threaded runtime:
 - **Telegram thread** — dedicated OS thread with single-threaded tokio runtime, fully isolated from the engine runtime. Runs outbound message queue and inbound command polling concurrently.
 - **Notion worker** — tokio task processing save requests from an mpsc channel. Non-blocking from the caller's perspective.
 - **Polymarket resolver** — background tokio task that periodically checks completed markets for resolution via the Gamma API, updating Notion records.
-- **Communication** — `watch` channels for latest-value feeds, `Arc<Mutex<>>` for shared mutable state (market, budget), `mpsc` for Telegram/Notion message queues
+- **Communication** — `watch` channels for latest-value feeds (inside adapters), `Arc<Mutex<>>` for shared mutable state (market, budget), `mpsc` for Telegram/Notion message queues
 
 ## Data Flow
 
 ```mermaid
 flowchart LR
-    BIN["Binance<br/>aggTrade"] -->|watch::channel| TC["TickContext<br/>(snapshot)"]
-    BIN -->|push_history| BH["binance_history<br/>(VecDeque)"]
-    CB["Coinbase<br/>ticker"] -->|watch::channel| TC
-    CL["Chainlink<br/>oracle"] -->|watch::channel| TC
-    CL -->|push_history| CH["chainlink_history<br/>(VecDeque)"]
-    PM["Polymarket<br/>prices"] -->|"Arc&lt;Mutex&lt;Option&lt;Arc&lt;Market&gt;&gt;&gt;&gt;"| MKT["market.up/down<br/>.best_bid/ask"]
-
-    BH & CH --> TC
-    MKT --> TC
+    BIN["BinanceAdapter<br/>(PriceFeedPort)"] -->|latest()| TC["TickContext<br/>(snapshot)"]
+    CB["CoinbaseAdapter<br/>(PriceFeedPort)"] -->|latest()| TC
+    CL["ChainlinkAdapter<br/>(PriceFeedPort)"] -->|latest()| TC
+    PM["PolymarketPriceAdapter<br/>(MarketPricePort)"] -->|current_market()| TC
 
     TC --> ENTRY["Strategy.create_order()"]
     ENTRY --> OI["OrderIntent"]
-    OI --> SE["StrategyEngine<br/>budget check → sign_and_submit()"]
-    SE --> CLOB["Polymarket CLOB"]
+    OI --> SE["StrategyEngine<br/>budget check"]
+    SE -->|submit_order()| EX["PolymarketOrderAdapter<br/>(ExchangePort)"]
+    EX --> CLOB["Polymarket CLOB"]
     SE -->|deduct cost| BUDGET["Shared Budget"]
-    SE -->|save| NOTION["Notion<br/>(via mpsc)"]
+    SE -->|save()| NOT["NotionAdapter<br/>(PersistencePort)"]
 ```
 
 ## Key Design Decisions
 
-1. **Strategy/Engine separation** — Strategies are pure functions of `TickContext → Option<(Direction, OrderIntent)>`. They never touch I/O, WebSockets, or SDK internals. This makes them trivially testable and interchangeable.
+1. **Hexagonal Architecture** — All external dependencies are behind port traits. The engine and domain have zero direct dependencies on WebSocket libraries, HTTP clients, or SDKs. Adapters can be swapped, mocked, or tested independently.
 
-2. **Watch channels for price feeds** — `tokio::sync::watch` provides latest-value semantics, ideal for price feeds where only the most recent value matters. No backpressure concerns.
+2. **Strategy/Engine separation** — Strategies are pure functions of `TickContext → Option<(Direction, OrderIntent)>`. They never touch I/O, WebSockets, or SDK internals. This makes them trivially testable and interchangeable.
 
-3. **Dual strike price** — Both Binance history and Chainlink oracle price are looked up from history buffers for each market. The engine decides match semantics per source: Chainlink uses exact timestamp match (it's the settlement oracle); Binance uses latest price at or before market start. The integrations layer provides a generic `lookup_history` function; the business decision lives in the engine.
+3. **Port-based price feeds** — `PriceFeedPort` provides `latest()`, `is_ready()`, and optional `lookup_history()`. The engine doesn't know whether data comes from WebSockets, REST APIs, or mock data.
 
-4. **Budget tracking** — Shared `Arc<Mutex<f64>>` budget is deducted on each buy trade and checked before order placement. When budget drops below $1.00, the engine stops trading. Budget is queryable and settable at runtime via Telegram.
+4. **ClockPort abstraction** — All time access goes through `ClockPort`, making the entire system testable with mock clocks. Domain types like `Market.time_to_expire_ms()` take `now_ms` as a parameter instead of calling global state.
 
-5. **Market rotation** — The engine automatically discovers and rotates to new markets as they open via `engine.run()`, running continuously across market boundaries. Per-market state (trades, cooldowns) is cleared between rotations.
+5. **Composition Root pattern** — `main.rs` is the only place that knows about concrete adapter types. It creates all adapters, injects them into the engine, and starts the system. No other module imports from `adapters/`.
 
-6. **Telegram isolation** — The Telegram bot runs on a dedicated OS thread with its own single-threaded tokio runtime, preventing any Telegram latency or errors from affecting the trading engine. Only messages from the configured `bot_telegram_chat_id` are processed.
+6. **Watch channels inside adapters** — `tokio::sync::watch` for latest-value semantics is an implementation detail of price feed adapters, not exposed to the engine.
 
-7. **Failed order cooldown** — After a CLOB submission failure, the engine waits 3 seconds before attempting another order, preventing rapid-fire failures.
+7. **Dual strike price** — Both Binance history and Chainlink oracle price are looked up via `PriceFeedPort.lookup_history()`. The engine decides match semantics per source: Chainlink uses exact timestamp match; Binance uses latest-at-or-before.
 
-8. **Secret file truncation** — By default (`truncate_secrets_file = true`), the secrets file is emptied after reading at startup, so secrets do not remain on disk. All secrets (polygon key, telegram token, notion secret) are stored in a single `secrets.toml` file.
+8. **Budget tracking** — Shared `Arc<Mutex<f64>>` budget is deducted on each buy trade and checked before order placement. When budget drops below $1.00, the engine stops trading. Budget is queryable and settable at runtime via Telegram.
 
-9. **Flat config** — All configuration lives in a single flat TOML file with no nested sections. Keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`, `notion_`), making it easy to grep and manage.
+9. **Market rotation** — The engine automatically discovers and rotates to new markets as they open via `engine.run()`, running continuously across market boundaries. Per-market state (trades, cooldowns) is cleared between rotations.
 
-10. **Thin main.rs** — `main.rs` is pure startup wiring: load config, spawn integrations, build engine, call `engine.run()`, handle shutdown. All orchestration logic (market rotation, tick loop, feed readiness) lives in the engine.
+10. **Telegram isolation** — The Telegram bot runs on a dedicated OS thread with its own single-threaded tokio runtime, preventing any Telegram latency or errors from affecting the trading engine.
 
-11. **Non-blocking Notion saves** — Notion API calls are queued via mpsc and processed by a background worker, so the trading engine is never blocked by network latency.
+11. **Failed order cooldown** — After a CLOB submission failure, the engine waits 3 seconds before attempting another order, preventing rapid-fire failures.
 
-12. **Polymarket resolver** — A background task periodically queries the Gamma API for completed market resolutions, automatically updating Notion records from "completed" to "resolved" with the winning outcome.
+12. **Secret file truncation** — By default, the secrets file is emptied after reading at startup.
 
-13. **Private engine fields** — All `StrategyEngine` fields are private. The public API is three methods: `new()`, `authenticate()`, and `run()`. Internal concerns (snapshot, tick execution, order placement, strike resolution) are fully encapsulated.
+13. **Flat config** — All configuration lives in a single flat TOML file with prefixed keys (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`, `notion_`).
+
+14. **Non-blocking Notion saves** — Notion API calls are queued via mpsc and processed by a background worker, so the trading engine is never blocked.
+
+15. **Private engine fields** — All `StrategyEngine` fields are private. The public API is two methods: `new()` and `run()`. Internal concerns are fully encapsulated.
 
 ## External Dependencies
 
@@ -208,8 +285,8 @@ flowchart LR
 | `polymarket-client-sdk` | CLOB client, WS price streams, Gamma API, order signing |
 | `tokio` | Async runtime, channels, signals |
 | `tokio-tungstenite` | WebSocket connections (Binance, Coinbase, Chainlink) |
+| `async-trait` | Async methods in port trait objects |
 | `teloxide` | Telegram Bot API client (long-polling, message sending, command menu) |
 | `reqwest` | HTTP client (Telegram via teloxide, Notion API, Gamma API) |
 | `alloy-signer-local` | Polygon wallet signing |
-| `k256` | Secp256k1 cryptography |
 | `serde` / `toml` | Config deserialization |

@@ -1,3 +1,4 @@
+use crate::ports::PersistencePort;
 use log::{debug, error, warn};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -49,10 +50,17 @@ impl NotionApi {
 
         if let Some(id) = self.find_by_name(slug).await {
             let body = json!({ "properties": build_properties(&props) });
-            if self.request("PATCH", &format!("{}/pages/{}", NOTION_API_BASE, id), &body).await.is_some() {
+            if self
+                .request("PATCH", &format!("{}/pages/{}", NOTION_API_BASE, id), &body)
+                .await
+                .is_some()
+            {
                 debug!("Notion record updated: {} (slug={})", id, slug);
             } else {
-                warn!("Notion failed to update record: {} (slug={})", id, slug);
+                warn!(
+                    "Notion failed to update record: {} (slug={})",
+                    id, slug
+                );
             }
             return;
         }
@@ -64,7 +72,10 @@ impl NotionApi {
             "parent": { "database_id": self.database_id },
             "properties": build_properties(&props),
         });
-        match self.request("POST", &format!("{}/pages", NOTION_API_BASE), &body).await {
+        match self
+            .request("POST", &format!("{}/pages", NOTION_API_BASE), &body)
+            .await
+        {
             Some(resp) => {
                 let id = resp["id"].as_str().unwrap_or_default();
                 debug!("Notion record created: {} (slug={})", id, slug);
@@ -86,7 +97,10 @@ impl NotionApi {
             },
         });
 
-        let url = format!("{}/databases/{}/query", NOTION_API_BASE, self.database_id);
+        let url = format!(
+            "{}/databases/{}/query",
+            NOTION_API_BASE, self.database_id
+        );
         let resp = self.request("POST", &url, &body).await?;
         let results = resp["results"].as_array()?;
 
@@ -103,7 +117,12 @@ impl NotionApi {
             let cost = read_number(page, "cost").unwrap_or(0.0);
             let shares_up = read_number(page, "shares_up").unwrap_or(0.0);
             let shares_down = read_number(page, "shares_down").unwrap_or(0.0);
-            records.push(NotionRecord { slug, cost, shares_up, shares_down });
+            records.push(NotionRecord {
+                slug,
+                cost,
+                shares_up,
+                shares_down,
+            });
         }
 
         Some(records)
@@ -120,7 +139,10 @@ impl NotionApi {
             "page_size": 1,
         });
 
-        let url = format!("{}/databases/{}/query", NOTION_API_BASE, self.database_id);
+        let url = format!(
+            "{}/databases/{}/query",
+            NOTION_API_BASE, self.database_id
+        );
         let resp = self.request("POST", &url, &body).await?;
         let results = resp["results"].as_array()?;
         let page = results.first()?;
@@ -160,7 +182,7 @@ impl NotionApi {
 }
 
 // ---------------------------------------------------------------------------
-// Public handle (non-blocking save via mpsc)
+// NotionAdapter — implements PersistencePort via non-blocking mpsc
 // ---------------------------------------------------------------------------
 
 struct SaveRequest {
@@ -169,16 +191,50 @@ struct SaveRequest {
 }
 
 #[derive(Clone)]
-pub struct Notion {
+pub struct NotionAdapter {
     tx: mpsc::UnboundedSender<SaveRequest>,
 }
 
-impl Notion {
-    /// Queue a save (upsert) request. The `market` parameter is the market slug.
-    /// The Notion "Name" (title) is set to the slug. Returns immediately.
-    pub fn save(&self, market: &str, properties: HashMap<&str, &str>) {
+impl NotionAdapter {
+    /// Spawn the Notion background worker. Returns an adapter for queueing saves.
+    /// If secret or database_id is empty, returns a no-op handle that silently drops saves.
+    /// Also returns the NotionApi for the resolver (if enabled).
+    pub fn spawn(
+        secret: Option<String>,
+        database_id: &str,
+        bot_name: &str,
+    ) -> (Self, Option<NotionApi>) {
+        let (tx, rx) = mpsc::unbounded_channel::<SaveRequest>();
+        let bot_name = bot_name.to_string();
+
+        let secret = match secret {
+            Some(s) if !s.is_empty() && !database_id.is_empty() => s,
+            _ => {
+                warn!("Notion disabled (missing secret or database_id)");
+                return (Self { tx }, None);
+            }
+        };
+
+        let api = NotionApi::new(secret, database_id.to_string(), bot_name.clone());
+        let resolver_api = api.clone();
+
+        let worker_api = api;
+        tokio::spawn(async move {
+            let mut rx = rx;
+            while let Some(req) = rx.recv().await {
+                worker_api.save(&req.name, &req.properties).await;
+            }
+        });
+
+        debug!("Notion background worker started");
+        (Self { tx }, Some(resolver_api))
+    }
+}
+
+impl PersistencePort for NotionAdapter {
+    fn save(&self, slug: &str, properties: HashMap<&str, &str>) {
         let req = SaveRequest {
-            name: market.to_string(),
+            name: slug.to_string(),
             properties: properties
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -188,35 +244,6 @@ impl Notion {
             warn!("Notion channel closed, save dropped");
         }
     }
-}
-
-/// Spawn the Notion background worker. Returns a handle for queueing saves.
-/// If secret or database_id is empty, returns a no-op handle that silently drops saves.
-pub fn spawn(secret: Option<String>, database_id: &str, bot_name: &str) -> (Notion, Option<NotionApi>) {
-    let (tx, rx) = mpsc::unbounded_channel::<SaveRequest>();
-    let bot_name = bot_name.to_string();
-
-    let secret = match secret {
-        Some(s) if !s.is_empty() && !database_id.is_empty() => s,
-        _ => {
-            warn!("Notion disabled (missing secret or database_id)");
-            return (Notion { tx }, None);
-        }
-    };
-
-    let api = NotionApi::new(secret, database_id.to_string(), bot_name.clone());
-    let resolver_api = api.clone();
-
-    let worker_api = api;
-    tokio::spawn(async move {
-        let mut rx = rx;
-        while let Some(req) = rx.recv().await {
-            worker_api.save(&req.name, &req.properties).await;
-        }
-    });
-
-    debug!("Notion background worker started");
-    (Notion { tx }, Some(resolver_api))
 }
 
 // ---------------------------------------------------------------------------
@@ -238,19 +265,46 @@ pub(crate) fn now_iso8601() -> String {
     let mut y = 1970i32;
     let mut remaining = days as i64;
     loop {
-        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-        if remaining < days_in_year { break; }
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining < days_in_year {
+            break;
+        }
         remaining -= days_in_year;
         y += 1;
     }
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 0usize;
     while m < 12 && remaining >= month_days[m] as i64 {
         remaining -= month_days[m] as i64;
         m += 1;
     }
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, minutes, seconds)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        m + 1,
+        remaining + 1,
+        hours,
+        minutes,
+        seconds
+    )
 }
 
 fn build_properties(properties: &HashMap<&str, &str>) -> Value {

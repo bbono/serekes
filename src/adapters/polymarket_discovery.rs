@@ -1,16 +1,31 @@
+use crate::domain::Market;
+use crate::ports::{ClockPort, MarketDiscoveryPort};
 use log::{debug, warn};
 use polymarket_client_sdk::gamma;
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
-use crate::types::Market;
+/// Gamma API adapter implementing MarketDiscoveryPort.
+pub struct GammaDiscoveryAdapter {
+    clock: Arc<dyn ClockPort>,
+}
 
-pub async fn discover_market(asset: &str, interval_minutes: u32) -> Market {
-    loop {
-        match fetch_active_market(asset, interval_minutes).await {
-            Ok(market) => return market,
-            Err(e) => {
-                warn!("Market discovery error: {}. Retrying...", e);
-                sleep(Duration::from_secs(5)).await;
+impl GammaDiscoveryAdapter {
+    pub fn new(clock: Arc<dyn ClockPort>) -> Self {
+        Self { clock }
+    }
+}
+
+#[async_trait::async_trait]
+impl MarketDiscoveryPort for GammaDiscoveryAdapter {
+    async fn discover(&self, asset: &str, interval_minutes: u32) -> Market {
+        loop {
+            match fetch_active_market(asset, interval_minutes, &*self.clock).await {
+                Ok(market) => return market,
+                Err(e) => {
+                    warn!("Market discovery error: {}. Retrying...", e);
+                    sleep(Duration::from_secs(5)).await;
+                }
             }
         }
     }
@@ -19,10 +34,11 @@ pub async fn discover_market(asset: &str, interval_minutes: u32) -> Market {
 async fn fetch_active_market(
     asset: &str,
     interval_minutes: u32,
+    clock: &dyn ClockPort,
 ) -> Result<Market, Box<dyn std::error::Error + Send + Sync>> {
     let asset_upper = asset.to_uppercase();
     let interval_ms = (interval_minutes as i64) * 60_000;
-    let now_ms = crate::common::time::now_ms();
+    let now_ms = clock.now_ms();
     let candidate_slugs = Market::candidate_slugs(asset, interval_minutes, now_ms);
     let bucket_start_ms = Market::bucket_start_ms(now_ms, interval_minutes);
 
@@ -54,7 +70,7 @@ async fn fetch_active_market(
 
         let expires_at_ms = market.end_date.map(|d| d.timestamp_millis()).unwrap_or(0);
 
-        if up_token.is_empty() || down_token.is_empty() || expires_at_ms <= crate::common::time::now_ms() {
+        if up_token.is_empty() || down_token.is_empty() || expires_at_ms <= clock.now_ms() {
             continue;
         }
 
@@ -67,7 +83,10 @@ async fn fetch_active_market(
             .and_then(|d| d.try_into().ok())
             .unwrap_or(0.0);
 
-        debug!("Found market {} tick_size={} min_order_size={}", slug, tick_size, min_order_size);
+        debug!(
+            "Found market {} tick_size={} min_order_size={}",
+            slug, tick_size, min_order_size
+        );
         return Ok(Market::new(
             slug.clone(),
             up_token,

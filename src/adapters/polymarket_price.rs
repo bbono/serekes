@@ -1,37 +1,73 @@
+use crate::domain::Market;
+use crate::ports::MarketPricePort;
 use futures_util::StreamExt;
 use log::{debug, error};
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::types::U256;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
-use crate::types::Market;
+/// Polymarket per-market bid/ask WebSocket adapter implementing MarketPricePort.
+pub struct PolymarketPriceAdapter {
+    shared_market: Arc<Mutex<Option<Arc<Market>>>>,
+    current_handle: Mutex<Option<JoinHandle<()>>>,
+}
 
-pub async fn connect_poly_price_ws(
-    shared_market: &Arc<Mutex<Option<Arc<Market>>>>,
-    market: &Market,
-) -> tokio::task::JoinHandle<()> {
-    let token_ids: Vec<U256> = vec![
-        U256::from_str(&market.up.token_id).expect("invalid up token_id"),
-        U256::from_str(&market.down.token_id).expect("invalid down token_id"),
-    ];
-    debug!(
-        "Connecting to Polymarket Price WS for market {}...",
-        market.slug
-    );
-    *shared_market.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(market.clone()));
-    let connected = Arc::new(tokio::sync::Notify::new());
-    let handle = spawn_poly_price_ws(shared_market.clone(), token_ids, connected.clone());
-    connected.notified().await;
-    handle
+impl PolymarketPriceAdapter {
+    pub fn new() -> Self {
+        Self {
+            shared_market: Arc::new(Mutex::new(None)),
+            current_handle: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MarketPricePort for PolymarketPriceAdapter {
+    async fn connect(&self, market: &Market) {
+        let token_ids: Vec<U256> = vec![
+            U256::from_str(&market.up.token_id).expect("invalid up token_id"),
+            U256::from_str(&market.down.token_id).expect("invalid down token_id"),
+        ];
+        debug!(
+            "Connecting to Polymarket Price WS for market {}...",
+            market.slug
+        );
+        *self.shared_market.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(Arc::new(market.clone()));
+        let connected = Arc::new(tokio::sync::Notify::new());
+        let handle =
+            spawn_poly_price_ws(self.shared_market.clone(), token_ids, connected.clone());
+        connected.notified().await;
+        *self.current_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    fn current_market(&self) -> Option<Arc<Market>> {
+        self.shared_market
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn disconnect(&self) {
+        if let Some(handle) = self
+            .current_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
+    }
 }
 
 fn spawn_poly_price_ws(
     shared: Arc<Mutex<Option<Arc<Market>>>>,
     token_ids: Vec<U256>,
     connected: Arc<tokio::sync::Notify>,
-) -> tokio::task::JoinHandle<()> {
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let ws_client = PolyWsClient::default();
@@ -63,7 +99,8 @@ fn spawn_poly_price_ws(
                                     continue;
                                 }
 
-                                let side = if is_up { &mut updated.up } else { &mut updated.down };
+                                let side =
+                                    if is_up { &mut updated.up } else { &mut updated.down };
 
                                 if let Some(bid) = &entry.best_bid {
                                     let v: f64 = bid.to_string().parse().unwrap_or(0.0);
