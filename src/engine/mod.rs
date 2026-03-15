@@ -1,15 +1,19 @@
 mod order;
+mod run;
 
 use crate::integrations::lookup_history;
 use crate::strategy::Strategy;
 use crate::strategy::{BonoStrategy, KonzervaStrategy};
 use crate::types::{Market, TickContext, TickResult, Trade};
-use alloy_signer_local::PrivateKeySigner;
-use log::{debug, warn};
+use alloy_signer_local::{LocalSigner, PrivateKeySigner};
+use log::{debug, error, warn};
 use polymarket_client_sdk::auth::state::Authenticated;
-use polymarket_client_sdk::auth::Normal;
-use polymarket_client_sdk::clob::Client as ClobClient;
+use polymarket_client_sdk::auth::{Normal, Signer as _};
+use polymarket_client_sdk::clob::types::SignatureType;
+use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
+use polymarket_client_sdk::POLYGON;
 use std::collections::VecDeque;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
@@ -24,7 +28,7 @@ fn create_strategy(name: &str) -> Box<dyn Strategy> {
 
 pub struct StrategyEngine {
     strategy: Box<dyn Strategy>,
-    pub paper_mode: bool,
+    paper_mode: bool,
 
     // Auth / SDK
     client: Option<ClobClient<Authenticated<Normal>>>,
@@ -34,18 +38,18 @@ pub struct StrategyEngine {
     trades: Vec<Trade>,
 
     // Last try_order invocation timestamp (ms)
-    pub last_try_order_failed_timestamp_ms: i64,
+    last_try_order_failed_timestamp_ms: i64,
 
     // Watch Receivers
-    pub binance_rx: watch::Receiver<(f64, i64)>,
-    pub coinbase_rx: watch::Receiver<(f64, i64)>,
-    pub chainlink_rx: watch::Receiver<(f64, i64)>,
-    pub shared_market: Arc<Mutex<Option<Arc<Market>>>>,
-    pub binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    pub chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+    binance_rx: watch::Receiver<(f64, i64)>,
+    coinbase_rx: watch::Receiver<(f64, i64)>,
+    chainlink_rx: watch::Receiver<(f64, i64)>,
+    shared_market: Arc<Mutex<Option<Arc<Market>>>>,
+    binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+    chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 
     // Budget (USDC), shared — safe to read/write from anywhere
-    pub budget: Arc<Mutex<f64>>,
+    budget: Arc<Mutex<f64>>,
 }
 
 impl StrategyEngine {
@@ -78,23 +82,39 @@ impl StrategyEngine {
         }
     }
 
-    pub fn set_client(
-        &mut self,
-        client: ClobClient<Authenticated<Normal>>,
-        signer: PrivateKeySigner,
-    ) {
-        self.client = Some(client);
-        self.signer_instance = Some(signer);
+    /// Authenticate with Polymarket SDK using a private key.
+    pub async fn authenticate(&mut self, private_key: &str) {
+        let signer: PrivateKeySigner = LocalSigner::from_str(private_key)
+            .unwrap()
+            .with_chain_id(Some(POLYGON));
+        let client_builder =
+            ClobClient::new("https://clob.polymarket.com", ClobConfig::builder().build()).unwrap();
+
+        match client_builder
+            .authentication_builder(&signer)
+            .signature_type(SignatureType::Proxy)
+            .authenticate()
+            .await
+        {
+            Ok(client) => {
+                self.client = Some(client);
+                self.signer_instance = Some(signer);
+                debug!("SDK authenticated");
+            }
+            Err(e) => {
+                error!("SDK auth failed: {e}");
+            }
+        }
     }
 
     /// Resets per-market state. Call between market rotations.
-    pub fn clear_state(&mut self) {
+    fn clear_state(&mut self) {
         self.trades.clear();
         self.last_try_order_failed_timestamp_ms = 0;
     }
 
     /// Runs one engine tick. Returns a TickResult with any trades filled.
-    pub async fn execute_tick(&mut self) -> TickResult {
+    async fn execute_tick(&mut self) -> TickResult {
         let ctx = self.snapshot();
         let timestamp_ms = ctx.polymarket_now_ms;
 
@@ -131,7 +151,7 @@ impl StrategyEngine {
     /// Resolve strike prices for a market from price histories.
     /// Chainlink uses exact timestamp match (settlement oracle);
     /// Binance uses latest price at or before market start.
-    pub async fn resolve_strike_prices(&self, market: &Market) -> Option<(f64, f64)> {
+    async fn resolve_strike_prices(&self, market: &Market) -> Option<(f64, f64)> {
         let deadline_ms = market.started_at_ms + 10_000;
         let mut chainlink_strike = 0.0f64;
         let mut binance_strike = 0.0f64;
@@ -183,5 +203,4 @@ impl StrategyEngine {
             trades: self.trades.clone(),
         }
     }
-
 }

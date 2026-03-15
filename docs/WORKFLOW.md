@@ -18,8 +18,8 @@
    - **Coinbase** — `ticker` stream → `coinbase_tx` (secondary oracle)
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
 10. Build `StrategyEngine` with chosen strategy (`engine_strategy`) and shared budget
-11. Authenticate Polymarket SDK (if private key present → live mode)
-12. Wait for all feeds (Binance, Coinbase, Chainlink > 0) before entering main loop
+11. Authenticate Polymarket SDK via `engine.authenticate()` (if private key present → live mode)
+12. Call `engine.run()` — the engine waits for all feeds, then enters the market rotation loop
 
 ```mermaid
 flowchart TD
@@ -37,12 +37,12 @@ flowchart TD
     G --> G2["Coinbase ticker"]
     G --> G3["Chainlink (Polymarket WS)"]
     G1 & G2 & G3 --> H["10. Build StrategyEngine"]
-    H --> I["11. Authenticate SDK (if live)"]
-    I --> J["12. Wait for all feeds > 0"]
-    J --> K["Market Rotation Loop"]
+    H --> I["11. engine.authenticate() (if live)"]
+    I --> J["12. engine.run()"]
+    J --> K["Wait for feeds → Market Rotation Loop"]
 ```
 
-## Market Rotation Loop
+## Market Rotation Loop (engine/run.rs)
 
 ```mermaid
 flowchart TD
@@ -98,7 +98,7 @@ flowchart TD
     S6 --> S1
 ```
 
-## Tick Loop (`execute_tick`)
+## Tick Loop (`execute_tick` in engine/mod.rs)
 
 ```mermaid
 flowchart TD
