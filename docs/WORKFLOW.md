@@ -7,16 +7,15 @@
 3. Build tokio runtime with configurable `worker_threads` (default 2)
 4. Sync server time offset with Polymarket CLOB
 5. Read wallet private key from key file (if exists)
-6. Spawn 4 WebSocket feed tasks (all concurrent):
+6. Spawn 3 WebSocket feed tasks (all concurrent):
    - **Binance** — `aggTrade` stream → `binance_tx` + `binance_history` (primary price oracle)
    - **Coinbase** — `ticker` stream → `coinbase_tx` (secondary oracle)
-   - **Deribit** — DVOL index → `dvol_tx` + `dvol_history` (implied volatility)
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
 7. Create shared budget (`Arc<Mutex<f64>>` from `initial_budget`)
 8. Build `StrategyEngine` with chosen strategy (e.g. `BonoStrategy`) and shared budget
 9. Authenticate Polymarket SDK (if private key present → live mode)
 10. Start Telegram bot on dedicated thread — register commands, sync menu
-11. Wait for all feeds (Binance, Coinbase, Chainlink, DVOL > 0) before entering main loop
+11. Wait for all feeds (Binance, Coinbase, Chainlink > 0) before entering main loop
 
 ```mermaid
 flowchart TD
@@ -27,9 +26,8 @@ flowchart TD
     E --> F["6. Spawn WS feeds (parallel)"]
     F --> F1["Binance aggTrade"]
     F --> F2["Coinbase ticker"]
-    F --> F3["Deribit DVOL"]
-    F --> F4["Chainlink (Polymarket WS)"]
-    F1 & F2 & F3 & F4 --> G["7. Create shared budget"]
+    F --> F3["Chainlink (Polymarket WS)"]
+    F1 & F2 & F3 --> G["7. Create shared budget"]
     G --> H["8. Build StrategyEngine"]
     H --> I["9. Authenticate SDK (if live)"]
     I --> I2["10. Start Telegram bot"]
@@ -143,10 +141,9 @@ trait Strategy {
 - `binance_price`, `binance_ts` — Binance spot price + timestamp (ms)
 - `coinbase_price`, `coinbase_ts` — Coinbase spot price + timestamp (ms)
 - `chainlink_price`, `chainlink_ts` — Chainlink oracle price + timestamp (ms)
-- `dvol`, `dvol_ts` — Deribit implied volatility index + timestamp (ms)
 - `polymarket_now_ms` — current time adjusted for Polymarket server offset (ms)
 - `market` — `Option<Arc<Market>>` with live bid/ask prices
-- `binance_history`, `chainlink_history`, `dvol_history` — `Arc<Mutex<VecDeque<(f64, i64)>>>` price histories
+- `binance_history`, `chainlink_history` — `Arc<Mutex<VecDeque<(f64, i64)>>>` price histories
 - `trades` — `Vec<Trade>` of all trades placed during this market
 
 **OrderIntent**: `Limit { side, price, size, order_type }` or `Market { side, amount, order_type }`.
@@ -216,7 +213,6 @@ On startup (and after each market expires):
 | Binance price | `aggTrade` WS | `watch<(f64, i64)>` | VecDeque (configurable max) | Exponential backoff 5s–60s |
 | Coinbase price | `ticker` WS | `watch<(f64, i64)>` | None | Exponential backoff 5s–60s |
 | Chainlink price | Polymarket live-data WS | `watch<(f64, i64)>` | VecDeque (interval_mins * 60 + 5) | Exponential backoff 5s–60s |
-| Deribit DVOL | `deribit_volatility_index` WS | `watch<(f64, i64)>` | VecDeque (configurable) | Exponential backoff 5s–60s |
 | Polymarket prices | SDK `subscribe_prices` | `Arc<Mutex<Option<Arc<Market>>>>` | None | 5s on subscribe error, 2s on stream error |
 
 Backoff formula: `min(5 * 2^attempt, 60)` seconds.
@@ -265,8 +261,6 @@ show_module = true
 [feeds]
 # binance_history_secs = 300          # Rolling price history window (default: interval * 60)
 # chainlink_history_secs = 300
-# dvol_history_secs = 300
-
 [telegram]
 bot_token = ""                        # Bot API token from @BotFather (empty = disabled)
 chat_id = 0                           # Owner's Telegram chat ID

@@ -87,7 +87,6 @@ show_module = true
 # When not set, each defaults to the market window (interval_minutes * 60).
 # binance_history_secs = 300
 # chainlink_history_secs = 300
-# dvol_history_secs = 300
 
 # ─── Telegram ──────────────────────────────────────────────────────────────────
 

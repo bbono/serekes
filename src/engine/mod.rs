@@ -39,11 +39,9 @@ pub struct StrategyEngine {
     pub binance_rx: watch::Receiver<(f64, i64)>,
     pub coinbase_rx: watch::Receiver<(f64, i64)>,
     pub chainlink_rx: watch::Receiver<(f64, i64)>,
-    pub dvol_rx: watch::Receiver<(f64, i64)>,
     pub shared_market: Arc<Mutex<Option<Arc<Market>>>>,
     pub binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
     pub chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    pub dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 
     // Budget (USDC), shared — safe to read/write from anywhere
     pub budget: Arc<Mutex<f64>>,
@@ -56,11 +54,9 @@ impl StrategyEngine {
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
         chainlink_rx: watch::Receiver<(f64, i64)>,
-        dvol_rx: watch::Receiver<(f64, i64)>,
         shared_market: Arc<Mutex<Option<Arc<Market>>>>,
         binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
         chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-        dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
         budget: Arc<Mutex<f64>>,
     ) -> Self {
         let strategy = create_strategy(&config.strategy);
@@ -74,11 +70,9 @@ impl StrategyEngine {
             binance_rx,
             coinbase_rx,
             chainlink_rx,
-            dvol_rx,
             shared_market,
             binance_history,
             chainlink_history,
-            dvol_history,
             budget,
         }
     }
@@ -137,7 +131,6 @@ impl StrategyEngine {
         let (binance_price, binance_ts) = *self.binance_rx.borrow();
         let (coinbase_price, coinbase_ts) = *self.coinbase_rx.borrow();
         let (chainlink_price, chainlink_ts) = *self.chainlink_rx.borrow();
-        let (dvol, dvol_ts) = *self.dvol_rx.borrow();
         let polymarket_now_ms = crate::common::time::now_ms();
         let market = self
             .shared_market
@@ -152,13 +145,10 @@ impl StrategyEngine {
             coinbase_ts,
             chainlink_price,
             chainlink_ts,
-            dvol,
-            dvol_ts,
             polymarket_now_ms,
             market,
             binance_history: self.binance_history.clone(),
             chainlink_history: self.chainlink_history.clone(),
-            dvol_history: self.dvol_history.clone(),
             trades: self.trades.clone(),
         }
     }

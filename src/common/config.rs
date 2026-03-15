@@ -40,7 +40,6 @@ impl Default for LoggerConfig {
 pub struct FeedsConfig {
     pub binance_history_secs: Option<u32>,
     pub chainlink_history_secs: Option<u32>,
-    pub dvol_history_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,7 +93,6 @@ impl Default for FeedsConfig {
         Self {
             binance_history_secs: None,
             chainlink_history_secs: None,
-            dvol_history_secs: None,
         }
     }
 }
@@ -112,11 +110,6 @@ impl FeedsConfig {
             .unwrap_or(default_secs * 1000)
     }
 
-    pub fn dvol_history_ms(&self, default_secs: i64) -> i64 {
-        self.dvol_history_secs
-            .map(|s| s as i64 * 1000)
-            .unwrap_or(default_secs * 1000)
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -245,10 +238,6 @@ impl AppConfig {
         if let Some(0) = self.feeds.chainlink_history_secs {
             errors.push("feeds.chainlink_history_secs must be > 0".into());
         }
-        if let Some(0) = self.feeds.dvol_history_secs {
-            errors.push("feeds.dvol_history_secs must be > 0".into());
-        }
-
         if !errors.is_empty() {
             panic!(
                 "Config validation failed:\n  - {}",

@@ -21,7 +21,7 @@ use common::config::AppConfig;
 use engine::StrategyEngine;
 use feeds::{
     connect_poly_price_ws, discover_market, resolve_strike_prices, spawn_binance_ws,
-    spawn_chainlink_ws, spawn_coinbase_ws, spawn_deribit_dvol_ws,
+    spawn_chainlink_ws, spawn_coinbase_ws,
 };
 use types::Market;
 
@@ -57,7 +57,6 @@ async fn async_main(config: AppConfig) {
     let (binance_tx, binance_rx) = watch::channel((0.0f64, 0i64));
     let (coinbase_tx, coinbase_rx) = watch::channel((0.0f64, 0i64));
     let (chainlink_tx, chainlink_rx) = watch::channel((0.0f64, 0i64));
-    let (dvol_tx, dvol_rx) = watch::channel((0.0f64, 0i64));
     let shared_market: Arc<Mutex<Option<Arc<Market>>>> = Arc::new(Mutex::new(None));
 
     // --- Spawn all price feed WebSockets ---
@@ -71,14 +70,6 @@ async fn async_main(config: AppConfig) {
         config.feeds.binance_history_ms(market_window_secs),
     );
     spawn_coinbase_ws(&market_asset, coinbase_tx);
-
-    let dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
-    spawn_deribit_dvol_ws(
-        market_asset.clone(),
-        dvol_tx,
-        dvol_history.clone(),
-        config.feeds.dvol_history_ms(market_window_secs),
-    );
 
     let chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
     spawn_chainlink_ws(
@@ -98,11 +89,9 @@ async fn async_main(config: AppConfig) {
         binance_rx,
         coinbase_rx,
         chainlink_rx,
-        dvol_rx,
         shared_market.clone(),
         binance_history.clone(),
         chainlink_history.clone(),
-        dvol_history.clone(),
         budget.clone(),
     );
 
@@ -310,8 +299,7 @@ async fn wait_for_feeds(engine: &StrategyEngine) {
         let b = engine.binance_rx.borrow().0;
         let c = engine.coinbase_rx.borrow().0;
         let cl = engine.chainlink_rx.borrow().0;
-        let d = engine.dvol_rx.borrow().0;
-        if b > 0.0 && c > 0.0 && cl > 0.0 && d > 0.0 {
+        if b > 0.0 && c > 0.0 && cl > 0.0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

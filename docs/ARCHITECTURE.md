@@ -11,14 +11,13 @@ graph TD
     subgraph INFRA["INFRASTRUCTURE LAYER"]
         BIN_WS["Binance WS<br/>(aggTrade)"]
         CB_WS["Coinbase WS<br/>(ticker)"]
-        DER_WS["Deribit WS<br/>(DVOL index)"]
         CL_WS["Chainlink WS<br/>(oracle)"]
         PM_WS["Polymarket<br/>Price WS"]
         SYNC["Time Sync<br/>(CLOB server)"]
         CHANNELS["tokio::sync::watch channels<br/>Arc&lt;Mutex&lt;VecDeque&gt;&gt; histories<br/>Arc&lt;Mutex&lt;Option&lt;Arc&lt;Market&gt;&gt;&gt;&gt; shared state"]
     end
 
-    BIN_WS & CB_WS & DER_WS & CL_WS & PM_WS & SYNC --> CHANNELS
+    BIN_WS & CB_WS & CL_WS & PM_WS & SYNC --> CHANNELS
 
     subgraph ENGINE["ENGINE LAYER"]
         SE["StrategyEngine<br/>• execute_tick<br/>• snapshot()<br/>• budget tracking"]
@@ -46,14 +45,12 @@ graph TD
     subgraph EXT["EXTERNAL SERVICES"]
         E_BIN["Binance<br/>WS + API"]
         E_CB["Coinbase<br/>WS"]
-        E_DER["Deribit<br/>WS"]
         E_PM["Polymarket<br/>CLOB+Gamma"]
         E_TG["Telegram<br/>Bot API"]
     end
 
     E_BIN --> BIN_WS
     E_CB --> CB_WS
-    E_DER --> DER_WS
     E_PM --> PM_WS
     E_TG --> TG
 ```
@@ -64,7 +61,7 @@ graph TD
 graph LR
     SRC["src/"] --> MAIN["main.rs<br/>Entry point: main(), runtime setup,<br/>bot loop, market rotation"]
     SRC --> COMMON["common/<br/>config.rs, logger.rs, time.rs"]
-    SRC --> FEEDS["feeds/<br/>binance.rs, coinbase.rs, deribit.rs,<br/>chainlink.rs, polymarket.rs"]
+    SRC --> FEEDS["feeds/<br/>binance.rs, coinbase.rs,<br/>chainlink.rs, polymarket.rs"]
     SRC --> ENG["engine/<br/>mod.rs (StrategyEngine, snapshot)<br/>order.rs (try_order, sign+submit)"]
     SRC --> STRAT["strategy/<br/>mod.rs, bono.rs, konzerva.rs"]
     SRC --> TG["telegram/<br/>mod.rs (spawn, outbound/inbound loops)<br/>commands.rs (command routing)"]
@@ -77,7 +74,7 @@ graph LR
 
 - Configurable tokio runtime (`worker_threads` in config)
 - WebSocket lifecycle management (connect, reconnect, backoff)
-- Data feed parsing (Binance aggTrade, Coinbase ticker, Deribit DVOL, Chainlink oracle)
+- Data feed parsing (Binance aggTrade, Coinbase ticker, Chainlink oracle)
 - Price history buffering (ring buffers via VecDeque, time-windowed eviction)
 - Data broadcast via `tokio::sync::watch` channels
 - Market discovery via Polymarket Gamma API
@@ -119,7 +116,7 @@ graph LR
 The bot uses **Tokio** with a configurable multi-threaded runtime:
 
 - **Runtime** — `worker_threads` configurable in `[bot]` config (default 2). Tunable for CPU vs throughput tradeoff.
-- **4 long-lived WS tasks** — each spawned via `tokio::spawn`, run independently with auto-reconnect
+- **3 long-lived WS tasks** — each spawned via `tokio::spawn`, run independently with auto-reconnect
 - **1 per-market WS task** — spawned for each active market, aborted on market expiry
 - **Main task** — runs the market rotation loop synchronously (discover → tick → cleanup → repeat)
 - **Tick loop** — sleeps `1_000_000 / engine_ticks_per_second` microseconds between ticks. Default 1000 ticks/sec (1ms). Configurable in `[bot]` config.
@@ -133,13 +130,11 @@ flowchart LR
     BIN["Binance<br/>aggTrade"] -->|watch::channel| TC["TickContext<br/>(snapshot)"]
     BIN -->|push_history| BH["binance_history<br/>(VecDeque)"]
     CB["Coinbase<br/>ticker"] -->|watch::channel| TC
-    DER["Deribit<br/>DVOL"] -->|watch::channel| TC
-    DER -->|push_history| DH["dvol_history<br/>(VecDeque)"]
     CL["Chainlink<br/>oracle"] -->|watch::channel| TC
     CL -->|push_history| CH["chainlink_history<br/>(VecDeque)"]
     PM["Polymarket<br/>prices"] -->|"Arc&lt;Mutex&lt;Option&lt;Arc&lt;Market&gt;&gt;&gt;&gt;"| MKT["market.up/down<br/>.best_bid/ask"]
 
-    BH & CH & DH --> TC
+    BH & CH --> TC
     MKT --> TC
 
     TC --> ENTRY["Strategy.create_order()"]
@@ -171,7 +166,7 @@ flowchart LR
 |-------|---------|
 | `polymarket-client-sdk` | CLOB client, WS price streams, Gamma API, order signing |
 | `tokio` | Async runtime, channels, signals |
-| `tokio-tungstenite` | WebSocket connections (Binance, Coinbase, Deribit, Chainlink) |
+| `tokio-tungstenite` | WebSocket connections (Binance, Coinbase, Chainlink) |
 | `teloxide` | Telegram Bot API client (long-polling, message sending, command menu) |
 | `reqwest` | HTTP client (Telegram via teloxide) |
 | `alloy-signer-local` | Polygon wallet signing |
