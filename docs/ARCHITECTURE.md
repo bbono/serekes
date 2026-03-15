@@ -87,7 +87,7 @@ graph LR
 - **Binance** (`binance.rs`): aggTrade WebSocket, price history buffering
 - **Coinbase** (`coinbase.rs`): ticker WebSocket
 - **Chainlink** (`chainlink.rs`): Polymarket live-data WS, oracle price history
-- **Polymarket** (`polymarket.rs`): market discovery (Gamma API), per-market price WS, strike price resolution, background market resolver
+- **Polymarket** (`polymarket.rs`): market discovery (Gamma API fetch + retry), per-market price WS, generic history lookup, background market resolver
 - **Telegram** (`telegram.rs`): dedicated OS thread with own tokio runtime, outbound message queue with retry, inbound long-polling with owner-only filtering, command registration and routing
 - **Notion** (`notion.rs`): background save worker via mpsc channel, upsert by Name, auto-populates created/updated dates and market URL
 
@@ -107,6 +107,7 @@ Shared helpers in `mod.rs`: exponential backoff, price history push, JSON parsin
 ### Engine Layer (`engine/`, types in `types/`)
 
 - TickContext snapshot construction from all feeds
+- Strike price resolution: decides match semantics per source (exact for Chainlink, at-or-before for Binance)
 - Budget management: shared `Arc<Mutex<f64>>`, deducted on buy, checked before orders
 - Order signing and submission via Polymarket SDK (tick size + neg_risk auto-handled by SDK)
 - Minimum order size validation (Market: ≥ 1 USDC, Limit: ≥ `market.min_order_size`)
@@ -128,7 +129,7 @@ Shared helpers in `mod.rs`: exponential backoff, price history push, JSON parsin
 - **Config** (`common/config.rs`): Flat TOML deserialization with defaults and validation. All keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`, `notion_`). Security keys (`secrets_file`, `truncate_secrets_file`) have no prefix.
 - **Logger** (`common/logger.rs`): Always shows timestamp, bot name, module path, colored level, and message.
 - **Time** (`common/time.rs`): Server-synced `now_ms()` with Polymarket offset
-- **Types** (`types/`): Shared domain types (`Market`, `TickContext`, `TokenDirection`, `OrderIntent`, `Trade`, `Strategy` trait)
+- **Types** (`types/`): Shared domain types (`Market`, `TickContext`, `TokenDirection`, `OrderIntent`, `Trade`, `Strategy` trait). `Market` also owns domain rules: slug construction (`slug_for`, `candidate_slugs`), time bucketing (`bucket_start_ms`), and PnL computation (`compute_pnl`).
 - **Budget**: `Arc<Mutex<f64>>` shared between engine and Telegram commands — queryable/settable at runtime
 
 ## Concurrency Model
@@ -173,7 +174,7 @@ flowchart LR
 
 2. **Watch channels for price feeds** — `tokio::sync::watch` provides latest-value semantics, ideal for price feeds where only the most recent value matters. No backpressure concerns.
 
-3. **Dual strike price** — Both Binance history and Chainlink oracle price are looked up from history buffers for each market. Chainlink uses exact timestamp match (it's the settlement oracle); Binance uses latest price at or before market start.
+3. **Dual strike price** — Both Binance history and Chainlink oracle price are looked up from history buffers for each market. The engine decides match semantics per source: Chainlink uses exact timestamp match (it's the settlement oracle); Binance uses latest price at or before market start. The integrations layer provides a generic `lookup_history` function; the business decision lives in the engine.
 
 4. **Budget tracking** — Shared `Arc<Mutex<f64>>` budget is deducted on each buy trade and checked before order placement. When budget drops below $1.00, the engine stops trading. Budget is queryable and settable at runtime via Telegram.
 

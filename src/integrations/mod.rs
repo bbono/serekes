@@ -8,7 +8,7 @@ pub mod telegram;
 pub use binance::spawn_binance_ws;
 pub use chainlink::spawn_chainlink_ws;
 pub use coinbase::spawn_coinbase_ws;
-pub use polymarket::{connect_poly_price_ws, discover_market, resolve_strike_prices};
+pub use polymarket::{connect_poly_price_ws, discover_market, lookup_history};
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

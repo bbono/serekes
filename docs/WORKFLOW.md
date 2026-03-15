@@ -56,10 +56,11 @@ flowchart TD
     S2{"market_resolve_strike_price
     enabled?"}
 
-    S2a["② RESOLVE STRIKE PRICES
+    S2a["② RESOLVE STRIKE PRICES (engine)
     Chainlink: exact timestamp match in history
     Binance: latest price ≤ started_at_ms in history
-    Wait up to 10s for both"]
+    Wait up to 10s for both
+    Uses integrations::lookup_history for I/O"]
 
     S3["③ UPDATE SHARED MARKET STATE
     Create Market struct
@@ -207,7 +208,7 @@ Handles both Limit and Market order types via SDK builder pattern:
 
 On startup (and after each market expires):
 
-1. Computes current time bucket: `(now_ms / interval_ms) * interval_ms`
+1. Computes candidate slugs via `Market::candidate_slugs()` (domain rule in `types/market.rs`): time bucketing and slug format
 2. Checks two slugs: current bucket and next bucket (e.g. `btc-updown-5m-1710000`)
 3. Fetches market metadata from Polymarket Gamma API (`event_by_slug`)
 4. Extracts Up/Down token IDs from market outcomes (matches "UP"/"YES" and "DOWN"/"NO")
@@ -248,7 +249,8 @@ Background task that runs every `notion_resolver_interval_secs` (default 60s):
    - `closed == true`
    - `outcomePrices` contains a `"1"` (winner identified)
    - `events[0].eventMetadata.priceToBeat` exists
-5. If resolved, updates the Notion record: `status → "resolved"`, `resolution → "Up"/"Down"`, `updated → now`
+5. Computes PnL via `Market::compute_pnl()` (domain rule in `types/market.rs`)
+6. If resolved, updates the Notion record: `status → "resolved"`, `resolution → "Up"/"Down"`, `pnl`, `updated → now`
 6. Waits 1 second between Gamma API calls to respect rate limits
 
 ## Telegram Integration

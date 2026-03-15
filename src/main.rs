@@ -20,7 +20,7 @@ use tokio::time::{sleep, Duration};
 use common::config::AppConfig;
 use engine::StrategyEngine;
 use integrations::{
-    connect_poly_price_ws, discover_market, resolve_strike_prices, spawn_binance_ws,
+    connect_poly_price_ws, discover_market, spawn_binance_ws,
     spawn_chainlink_ws, spawn_coinbase_ws,
 };
 use types::Market;
@@ -151,8 +151,6 @@ async fn async_main(config: AppConfig) {
             interval_minutes,
             resolve_strike_price,
             &shared_market,
-            &chainlink_history,
-            &binance_history,
             config.tick_interval_us(),
             &notion,
         ) => None,
@@ -175,8 +173,6 @@ async fn run_bot_loop(
     interval_minutes: u32,
     resolve_strike_price: bool,
     shared_market: &Arc<Mutex<Option<Arc<Market>>>>,
-    chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
-    binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     tick_interval_us: u64,
     notion: &integrations::notion::Notion,
 ) {
@@ -190,7 +186,7 @@ async fn run_bot_loop(
         }
 
         if resolve_strike_price {
-            match resolve_strike_prices(chainlink_history, binance_history, &market).await {
+            match engine.resolve_strike_prices(&market).await {
                 Some((chainlink_strike, binance_strike)) => {
                     market.strike_price = chainlink_strike;
                     market.strike_price_binance = binance_strike;

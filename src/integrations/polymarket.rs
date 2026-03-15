@@ -36,22 +36,17 @@ async fn fetch_active_market(
 ) -> Result<Market, Box<dyn std::error::Error + Send + Sync>> {
     let asset_upper = asset.to_uppercase();
     let interval_ms = (interval_minutes as i64) * 60_000;
-    let kline_interval = if interval_minutes >= 60 {
-        format!("{}h", interval_minutes / 60)
-    } else {
-        format!("{}m", interval_minutes)
-    };
-
-    let bucket_start_ms = (crate::common::time::now_ms() / interval_ms) * interval_ms;
+    let now_ms = crate::common::time::now_ms();
+    let candidate_slugs = Market::candidate_slugs(asset, interval_minutes, now_ms);
+    let bucket_start_ms = Market::bucket_start_ms(now_ms, interval_minutes);
 
     let gamma_client = gamma::Client::default();
 
-    for started_at_ms in [bucket_start_ms, bucket_start_ms + interval_ms] {
-        let ts_secs = started_at_ms / 1000;
-        let slug = format!("{}-updown-{}-{}", asset, kline_interval, ts_secs);
+    for (i, slug) in candidate_slugs.iter().enumerate() {
+        let started_at_ms = bucket_start_ms + (i as i64) * interval_ms;
 
         let request = gamma::types::request::EventBySlugRequest::builder()
-            .slug(&slug)
+            .slug(slug)
             .build();
         let event = match gamma_client.event_by_slug(&request).await {
             Ok(e) => e,
@@ -88,7 +83,7 @@ async fn fetch_active_market(
 
         debug!("Found market {} tick_size={} min_order_size={}", slug, tick_size, min_order_size);
         return Ok(Market::new(
-            slug,
+            slug.clone(),
             up_token,
             down_token,
             started_at_ms,
@@ -123,49 +118,21 @@ fn extract_up_down_tokens(outcomes: &[String], tokens: &[String]) -> (String, St
 }
 
 // ---------------------------------------------------------------------------
-// Strike price resolution
+// History lookup (generic infrastructure — callers decide the match mode)
 // ---------------------------------------------------------------------------
 
-pub async fn resolve_strike_prices(
-    chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
-    binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
-    market: &Market,
-) -> Option<(f64, f64)> {
-    let deadline_ms = market.started_at_ms + 10_000;
-    let mut chainlink_strike = 0.0f64;
-    let mut binance_strike = 0.0f64;
-    loop {
-        if chainlink_strike == 0.0 {
-            chainlink_strike = lookup_strike(chainlink_history, market.started_at_ms, true);
-        }
-        if binance_strike == 0.0 {
-            binance_strike = lookup_strike(binance_history, market.started_at_ms, false);
-        }
-        if chainlink_strike > 0.0 && binance_strike > 0.0 {
-            return Some((chainlink_strike, binance_strike));
-        }
-        if crate::common::time::now_ms() > deadline_ms {
-            warn!(
-                "Strike resolution timed out for {}: chainlink={} binance={}",
-                market.slug,
-                if chainlink_strike > 0.0 { format!("{:.2}", chainlink_strike) } else { "missing".into() },
-                if binance_strike > 0.0 { format!("{:.2}", binance_strike) } else { "missing".into() },
-            );
-            return None;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn lookup_strike(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, started_ms: i64, exact: bool) -> f64 {
+/// Look up a price from a history buffer by timestamp.
+/// If `exact` is true, requires an exact timestamp match;
+/// otherwise returns the latest price at or before `target_ms`.
+pub fn lookup_history(history: &Arc<Mutex<VecDeque<(f64, i64)>>>, target_ms: i64, exact: bool) -> f64 {
     let hist = history.lock().unwrap_or_else(|e| e.into_inner());
     hist.iter()
         .rev()
         .find(|(_, ts)| {
             if exact {
-                *ts == started_ms
+                *ts == target_ms
             } else {
-                *ts <= started_ms
+                *ts <= target_ms
             }
         })
         .map(|(price, _)| *price)
@@ -311,11 +278,7 @@ impl Resolver {
 
         for record in &records {
             if let Some(outcome) = self.check_resolution(&record.slug).await {
-                let pnl = match outcome.to_lowercase().as_str() {
-                    "up" => record.shares_up - record.cost,
-                    "down" => record.shares_down - record.cost,
-                    _ => -record.cost,
-                };
+                let pnl = Market::compute_pnl(&outcome, record.shares_up, record.shares_down, record.cost);
                 let pnl_str = format!("{:.2}", pnl);
                 debug!("Market {} resolved: {} pnl={}", record.slug, outcome, pnl_str);
 
