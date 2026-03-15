@@ -4,7 +4,7 @@ mod domain;
 mod engine;
 mod ports;
 
-use log::{debug, error, warn};
+use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 
 use common::config::AppConfig;
@@ -46,7 +46,7 @@ async fn async_main(config: AppConfig) {
     // --- Budget (shared, safe to update at runtime) ---
     let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot_initial_budget));
 
-    debug!(
+    info!(
         "Starting asset={} mode={}",
         market_asset.to_uppercase(),
         mode

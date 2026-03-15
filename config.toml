@@ -99,7 +99,7 @@ market_resolve_strike_price = false
 #   "info,serekes::integrations=warn"           — integrations quieter, rest at info
 #   "info,serekes=debug"                        — all bot modules at debug
 # Default: "info"
-logger_level = "debug"
+logger_level = "info"
 
 # ─── Integrations (Feeds) ─────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 use tokio::time::{sleep, Duration};
 
 use crate::domain::{MarketSummary, TokenDirection};
@@ -20,6 +20,7 @@ impl StrategyEngine {
 
         loop {
             let mut market = self.discovery.discover(asset, interval_minutes).await;
+            info!("Market discovered: {}", market.slug);
 
             if !resolve_strike_price {
                 debug!("Skipping strike resolution for {}", market.slug);
@@ -82,7 +83,7 @@ impl StrategyEngine {
         market: &crate::domain::Market,
         tick_interval_us: u64,
     ) -> MarketSummary {
-        debug!(
+        info!(
             "Trading market {} (expires in {:.0}s)",
             market.slug,
             market.time_to_expire_ms(self.clock.now_ms()) as f64 / 1000.0
@@ -117,9 +118,9 @@ impl StrategyEngine {
                 }
             }
         }
-        debug!(
-            "Trading completed. Market {} ({} trades)",
-            market.slug, summary.trades
+        info!(
+            "Trading completed. Market {} ({} trades, cost={:.2})",
+            market.slug, summary.trades, summary.cost
         );
         summary
     }
@@ -134,6 +135,6 @@ impl StrategyEngine {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        debug!("All feeds ready.");
+        info!("All feeds ready.");
     }
 }

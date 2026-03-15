@@ -46,15 +46,6 @@ impl StrategyEngine {
 
         // --- Submit or simulate ---
         let result = if !self.exchange.is_paper_mode() {
-            let time_from_last_failed_order_ms =
-                self.clock.now_ms() - self.last_try_order_failed_timestamp_ms;
-            if time_from_last_failed_order_ms <= 3000 {
-                warn!(
-                    "Order cooldown: {:?} {}ms since last failure",
-                    direction, time_from_last_failed_order_ms
-                );
-                return None;
-            }
             match self.exchange.submit_order(&token_id, &intent).await {
                 Ok(resp) => {
                     match &resp.status {
@@ -79,11 +70,9 @@ impl StrategyEngine {
                             );
                         }
                     }
-                    self.last_try_order_failed_timestamp_ms = 0;
                     resp
                 }
                 Err(e) => {
-                    self.last_try_order_failed_timestamp_ms = self.clock.now_ms();
                     error!("Order submit failed: {:?} {e}", direction);
                     return None;
                 }

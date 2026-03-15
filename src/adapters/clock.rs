@@ -15,7 +15,8 @@ impl PolymarketClock {
     }
 
     /// Fetch the time offset from the Polymarket CLOB server and store it.
-    pub async fn sync(&self) -> i64 {
+    /// Retries up to 3 times, then exits if sync is not possible.
+    pub async fn sync(&self) {
         use log::{debug, error, warn};
         use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 
@@ -27,27 +28,34 @@ impl PolymarketClock {
                 .unwrap()
                 .as_millis() as i64
         };
-        match clob.server_time().await {
-            Ok(server_ts) => {
-                let offset_ms: i64 = (server_ts * 1000) - local_ms();
-                self.offset_ms.store(offset_ms, Ordering::Relaxed);
-                debug!(
-                    "Time sync: server={}s local={}ms offset={}ms",
-                    server_ts,
-                    local_ms(),
-                    offset_ms
-                );
-                if offset_ms.abs() > 300_000 {
-                    warn!("Large time skew: offset={offset_ms}ms");
+
+        for attempt in 1..=3 {
+            match clob.server_time().await {
+                Ok(server_ts) => {
+                    let offset_ms: i64 = (server_ts * 1000) - local_ms();
+                    self.offset_ms.store(offset_ms, Ordering::Relaxed);
+                    debug!(
+                        "Time sync: server={}s local={}ms offset={}ms",
+                        server_ts,
+                        local_ms(),
+                        offset_ms
+                    );
+                    if offset_ms.abs() > 300_000 {
+                        warn!("Large time skew: offset={offset_ms}ms");
+                    }
+                    return;
                 }
-                offset_ms
-            }
-            Err(e) => {
-                error!("Time sync failed: {e} (using local clock)");
-                self.offset_ms.store(0, Ordering::Relaxed);
-                0
+                Err(e) => {
+                    warn!("Time sync failed (attempt {}/3): {e}", attempt);
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
             }
         }
+
+        error!("Time sync failed after 3 attempts. Exiting.");
+        std::process::exit(1);
     }
 }
 

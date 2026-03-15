@@ -1,7 +1,9 @@
 use crate::domain::Market;
 use crate::ports::MarketPricePort;
 use futures_util::StreamExt;
-use log::{debug, error};
+use log::{debug, error, warn};
+
+use super::backoff_secs;
 use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 use polymarket_client_sdk::types::U256;
 use std::str::FromStr;
@@ -69,16 +71,20 @@ fn spawn_poly_price_ws(
     connected: Arc<tokio::sync::Notify>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut attempts = 0u32;
         loop {
             let ws_client = PolyWsClient::default();
             let stream = match ws_client.subscribe_prices(token_ids.clone()) {
                 Ok(s) => s,
                 Err(e) => {
-                    error!("Polymarket Price WS subscribe error: {}. Retrying...", e);
-                    sleep(Duration::from_secs(5)).await;
+                    let delay = backoff_secs(attempts);
+                    error!("Polymarket Price WS subscribe error: {}. Retrying in {}s...", e, delay);
+                    sleep(Duration::from_secs(delay)).await;
+                    attempts += 1;
                     continue;
                 }
             };
+            attempts = 0;
             debug!("Connected to Polymarket Price WS");
             connected.notify_one();
             let mut stream = Box::pin(stream);
@@ -89,7 +95,7 @@ fn spawn_poly_price_ws(
                         let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(current) = guard.as_ref() {
                             let mut updated = (**current).clone();
-                            let ts_ms = price_change.timestamp * 1000;
+                            let ts_ms = price_change.timestamp;
                             let mut changed = false;
                             for entry in &price_change.price_changes {
                                 let asset_str = entry.asset_id.to_string();
@@ -131,7 +137,8 @@ fn spawn_poly_price_ws(
                     }
                 }
             }
-            sleep(Duration::from_secs(2)).await;
+            warn!("Polymarket Price WS disconnected. Reconnecting...");
+            sleep(Duration::from_secs(5)).await;
         }
     })
 }

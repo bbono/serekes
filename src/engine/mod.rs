@@ -5,7 +5,7 @@ use crate::domain::strategy::Strategy;
 use crate::domain::strategy::{BonoStrategy, KonzervaStrategy};
 use crate::domain::{Market, TickContext, TickResult, Trade};
 use crate::ports::{ClockPort, ExchangePort, MarketDiscoveryPort, MarketPricePort, PersistencePort, PriceFeedPort};
-use log::{debug, warn};
+use log::{info, warn};
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
@@ -32,7 +32,6 @@ pub struct StrategyEngine {
 
     // --- Per-market state ---
     trades: Vec<Trade>,
-    last_try_order_failed_timestamp_ms: i64,
 
     // Budget (USDC), shared — safe to read/write from anywhere
     budget: Arc<Mutex<f64>>,
@@ -63,7 +62,6 @@ impl StrategyEngine {
             persistence,
             clock,
             trades: Vec::new(),
-            last_try_order_failed_timestamp_ms: 0,
             budget,
         }
     }
@@ -71,7 +69,6 @@ impl StrategyEngine {
     /// Resets per-market state. Call between market rotations.
     fn clear_state(&mut self) {
         self.trades.clear();
-        self.last_try_order_failed_timestamp_ms = 0;
     }
 
     /// Runs one engine tick. Returns a TickResult with any trades filled.
@@ -81,18 +78,19 @@ impl StrategyEngine {
 
         let traded = if let Some(t) = self.try_order(&ctx).await {
             let cost = t.intent.cost();
+            let mut budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
             if cost > 0.0 {
-                let mut budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
                 *budget -= cost;
-                debug!(
+                info!(
                     "Buy {:?} price={:.4} size={:.4} status={:?} budget={:.2}",
                     t.direction, t.price, t.size, t.order_status, *budget
                 );
             } else {
-                debug!(
+                let proceeds = t.price * t.size;
+                *budget += proceeds;
+                info!(
                     "Sell {:?} price={:.4} size={:.4} status={:?} budget={:.2}",
-                    t.direction, t.price, t.size, t.order_status,
-                    *self.budget.lock().unwrap_or_else(|e| e.into_inner())
+                    t.direction, t.price, t.size, t.order_status, *budget
                 );
             }
             true

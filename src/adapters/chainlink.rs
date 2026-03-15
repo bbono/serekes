@@ -60,6 +60,7 @@ impl ChainlinkAdapter {
                             }
                         }
                         warn!("Chainlink WS disconnected. Reconnecting...");
+                        sleep(Duration::from_secs(5)).await;
                     }
                     Err(e) => {
                         let delay = backoff_secs(attempts);
