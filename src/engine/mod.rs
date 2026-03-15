@@ -1,21 +1,12 @@
 mod order;
 mod run;
 
-use crate::integrations::lookup_history;
-use crate::strategy::Strategy;
-use crate::strategy::{BonoStrategy, KonzervaStrategy};
-use crate::types::{Market, TickContext, TickResult, Trade};
-use alloy_signer_local::{LocalSigner, PrivateKeySigner};
-use log::{debug, error, warn};
-use polymarket_client_sdk::auth::state::Authenticated;
-use polymarket_client_sdk::auth::{Normal, Signer as _};
-use polymarket_client_sdk::clob::types::SignatureType;
-use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
-use polymarket_client_sdk::POLYGON;
-use std::collections::VecDeque;
-use std::str::FromStr;
+use crate::domain::strategy::Strategy;
+use crate::domain::strategy::{BonoStrategy, KonzervaStrategy};
+use crate::domain::{Market, TickContext, TickResult, Trade};
+use crate::ports::{ClockPort, ExchangePort, MarketDiscoveryPort, MarketPricePort, PersistencePort, PriceFeedPort};
+use log::{debug, warn};
 use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
 use tokio::time::{sleep, Duration};
 
 fn create_strategy(name: &str) -> Box<dyn Strategy> {
@@ -28,25 +19,20 @@ fn create_strategy(name: &str) -> Box<dyn Strategy> {
 
 pub struct StrategyEngine {
     strategy: Box<dyn Strategy>,
-    paper_mode: bool,
 
-    // Auth / SDK
-    client: Option<ClobClient<Authenticated<Normal>>>,
-    signer_instance: Option<PrivateKeySigner>,
+    // --- Outbound ports ---
+    binance_feed: Arc<dyn PriceFeedPort>,
+    coinbase_feed: Arc<dyn PriceFeedPort>,
+    chainlink_feed: Arc<dyn PriceFeedPort>,
+    market_price: Arc<dyn MarketPricePort>,
+    exchange: Arc<dyn ExchangePort>,
+    discovery: Arc<dyn MarketDiscoveryPort>,
+    persistence: Arc<dyn PersistencePort>,
+    clock: Arc<dyn ClockPort>,
 
-    // Trade history for current market
+    // --- Per-market state ---
     trades: Vec<Trade>,
-
-    // Last try_order invocation timestamp (ms)
     last_try_order_failed_timestamp_ms: i64,
-
-    // Watch Receivers
-    binance_rx: watch::Receiver<(f64, i64)>,
-    coinbase_rx: watch::Receiver<(f64, i64)>,
-    chainlink_rx: watch::Receiver<(f64, i64)>,
-    shared_market: Arc<Mutex<Option<Arc<Market>>>>,
-    binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-    chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 
     // Budget (USDC), shared — safe to read/write from anywhere
     budget: Arc<Mutex<f64>>,
@@ -54,56 +40,31 @@ pub struct StrategyEngine {
 
 impl StrategyEngine {
     pub fn new(
-        paper_mode: bool,
         strategy_name: &str,
-        binance_rx: watch::Receiver<(f64, i64)>,
-        coinbase_rx: watch::Receiver<(f64, i64)>,
-        chainlink_rx: watch::Receiver<(f64, i64)>,
-        shared_market: Arc<Mutex<Option<Arc<Market>>>>,
-        binance_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-        chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
+        binance_feed: Arc<dyn PriceFeedPort>,
+        coinbase_feed: Arc<dyn PriceFeedPort>,
+        chainlink_feed: Arc<dyn PriceFeedPort>,
+        market_price: Arc<dyn MarketPricePort>,
+        exchange: Arc<dyn ExchangePort>,
+        discovery: Arc<dyn MarketDiscoveryPort>,
+        persistence: Arc<dyn PersistencePort>,
+        clock: Arc<dyn ClockPort>,
         budget: Arc<Mutex<f64>>,
     ) -> Self {
         let strategy = create_strategy(strategy_name);
         Self {
             strategy,
-            paper_mode,
-            client: None,
-            signer_instance: None,
+            binance_feed,
+            coinbase_feed,
+            chainlink_feed,
+            market_price,
+            exchange,
+            discovery,
+            persistence,
+            clock,
             trades: Vec::new(),
             last_try_order_failed_timestamp_ms: 0,
-            binance_rx,
-            coinbase_rx,
-            chainlink_rx,
-            shared_market,
-            binance_history,
-            chainlink_history,
             budget,
-        }
-    }
-
-    /// Authenticate with Polymarket SDK using a private key.
-    pub async fn authenticate(&mut self, private_key: &str) {
-        let signer: PrivateKeySigner = LocalSigner::from_str(private_key)
-            .unwrap()
-            .with_chain_id(Some(POLYGON));
-        let client_builder =
-            ClobClient::new("https://clob.polymarket.com", ClobConfig::builder().build()).unwrap();
-
-        match client_builder
-            .authentication_builder(&signer)
-            .signature_type(SignatureType::Proxy)
-            .authenticate()
-            .await
-        {
-            Ok(client) => {
-                self.client = Some(client);
-                self.signer_instance = Some(signer);
-                debug!("SDK authenticated");
-            }
-            Err(e) => {
-                error!("SDK auth failed: {e}");
-            }
         }
     }
 
@@ -157,15 +118,15 @@ impl StrategyEngine {
         let mut binance_strike = 0.0f64;
         loop {
             if chainlink_strike == 0.0 {
-                chainlink_strike = lookup_history(&self.chainlink_history, market.started_at_ms, true);
+                chainlink_strike = self.chainlink_feed.lookup_history(market.started_at_ms, true);
             }
             if binance_strike == 0.0 {
-                binance_strike = lookup_history(&self.binance_history, market.started_at_ms, false);
+                binance_strike = self.binance_feed.lookup_history(market.started_at_ms, false);
             }
             if chainlink_strike > 0.0 && binance_strike > 0.0 {
                 return Some((chainlink_strike, binance_strike));
             }
-            if crate::common::time::now_ms() > deadline_ms {
+            if self.clock.now_ms() > deadline_ms {
                 warn!(
                     "Strike resolution timed out for {}: chainlink={} binance={}",
                     market.slug,
@@ -179,15 +140,11 @@ impl StrategyEngine {
     }
 
     fn snapshot(&mut self) -> TickContext {
-        let (binance_price, binance_ts) = *self.binance_rx.borrow();
-        let (coinbase_price, coinbase_ts) = *self.coinbase_rx.borrow();
-        let (chainlink_price, chainlink_ts) = *self.chainlink_rx.borrow();
-        let polymarket_now_ms = crate::common::time::now_ms();
-        let market = self
-            .shared_market
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let (binance_price, binance_ts) = self.binance_feed.latest();
+        let (coinbase_price, coinbase_ts) = self.coinbase_feed.latest();
+        let (chainlink_price, chainlink_ts) = self.chainlink_feed.latest();
+        let polymarket_now_ms = self.clock.now_ms();
+        let market = self.market_price.current_market();
 
         TickContext {
             binance_price,
@@ -198,8 +155,6 @@ impl StrategyEngine {
             chainlink_ts,
             polymarket_now_ms,
             market,
-            binance_history: self.binance_history.clone(),
-            chainlink_history: self.chainlink_history.clone(),
             trades: self.trades.clone(),
         }
     }

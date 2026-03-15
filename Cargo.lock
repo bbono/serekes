@@ -4113,6 +4113,7 @@ name = "serekes"
 version = "0.1.0"
 dependencies = [
  "alloy-signer-local",
+ "async-trait",
  "env_logger",
  "futures-util",
  "log",

@@ -4,7 +4,7 @@ pub mod konzerva;
 pub use bono::BonoStrategy;
 pub use konzerva::KonzervaStrategy;
 
-use crate::types::{OrderIntent, TickContext, TokenDirection};
+use super::{OrderIntent, TickContext, TokenDirection};
 
 pub trait Strategy {
     /// Called each tick when idle. Return Some((direction, intent)) to place an order.

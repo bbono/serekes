@@ -3,9 +3,16 @@
 ## Architecture Principles
 - Always separate business logic from infrastructure logic
 - All timestamps must be in millisecond precision; convert any non-ms timestamps to ms
+- Always use **Hexagonal Architecture (ports & adapters)** design principles when introducing changes to code
 
 ## Project Structure
 - Bot source code: `./src/`
+  - `src/domain/` — pure domain model (Market, Order, Strategy) — **no infrastructure dependencies**
+  - `src/ports/` — port trait definitions (ClockPort, PriceFeedPort, ExchangePort, etc.)
+  - `src/adapters/` — adapter implementations (Binance, Coinbase, Chainlink, Polymarket, Telegram, Notion)
+  - `src/engine/` — application service (StrategyEngine) — depends **only on port traits**
+  - `src/common/` — cross-cutting: config, logger
+  - `src/main.rs` — composition root: wires adapters → ports → engine
 - Configuration: `./config.toml`
 - `.sample-code/` contains code samples only — NOT part of the solution. Use only when explicitly asked.
 - `.temp/` — never read files in this folder

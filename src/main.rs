@@ -1,18 +1,14 @@
+mod adapters;
 mod common;
+mod domain;
 mod engine;
-mod integrations;
-mod strategy;
-mod types;
+mod ports;
 
 use log::{debug, error, warn};
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
 
 use common::config::AppConfig;
 use engine::StrategyEngine;
-use integrations::{spawn_binance_ws, spawn_chainlink_ws, spawn_coinbase_ws};
-use types::Market;
 
 fn main() {
     rustls::crypto::ring::default_provider()
@@ -41,8 +37,11 @@ async fn async_main(config: AppConfig) {
         );
         std::process::exit(1);
     }
-    let paper_mode = secrets.polygon_private_key.is_none();
-    let mode = if paper_mode { "paper" } else { "live" };
+    let mode = if secrets.polygon_private_key.is_none() {
+        "paper"
+    } else {
+        "live"
+    };
 
     // --- Budget (shared, safe to update at runtime) ---
     let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot_initial_budget));
@@ -53,75 +52,80 @@ async fn async_main(config: AppConfig) {
         mode
     );
 
-    // --- Time synchronization (before anything that uses now_ms) ---
-    common::time::fetch_time_offset_ms().await;
+    // --- Clock adapter (must be first — everything depends on synced time) ---
+    let clock = Arc::new(adapters::clock::PolymarketClock::new());
+    clock.sync().await;
 
-    // --- Telegram ---
-    let mut cmds = integrations::telegram::Commands::new();
+    // --- Telegram adapter (inbound commands + outbound notifications) ---
+    let mut cmds = adapters::telegram::Commands::new();
     let budget_ref = budget.clone();
     cmds.register("budget", "Budget", move |args| {
         bot_budget_command(&budget_ref, args)
     });
-    let _tg = integrations::telegram::spawn(
+    let _tg = adapters::telegram::TelegramAdapter::spawn(
         secrets.telegram_bot_token,
         config.bot_telegram_chat_id,
         cmds.build(),
     );
 
-    // --- Notion ---
-    let (notion, notion_api) = integrations::notion::spawn(
+    // --- Persistence adapter (Notion) ---
+    let (notion, notion_api) = adapters::notion::NotionAdapter::spawn(
         secrets.notion_integration_secret,
         &config.notion_database_id,
         &config.bot_name,
     );
 
-    // --- Polymarket resolver ---
+    // --- Polymarket resolver (background task) ---
     if let Some(api) = notion_api {
-        integrations::polymarket::spawn_resolver(api, config.polymarket_resolver_interval_secs);
+        adapters::resolver::spawn_resolver(api, config.polymarket_resolver_interval_secs);
     }
 
-    // --- Data broadcast channels ---
-    let (binance_tx, binance_rx) = watch::channel((0.0f64, 0i64));
-    let (coinbase_tx, coinbase_rx) = watch::channel((0.0f64, 0i64));
-    let (chainlink_tx, chainlink_rx) = watch::channel((0.0f64, 0i64));
-    let shared_market: Arc<Mutex<Option<Arc<Market>>>> = Arc::new(Mutex::new(None));
-
-    // --- Spawn all price feed WebSockets ---
+    // --- Price feed adapters ---
     let market_window_secs = (config.market_interval_minutes * 60) as i64;
 
-    let binance_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
-    spawn_binance_ws(
+    let binance_feed = Arc::new(adapters::binance::BinanceAdapter::spawn(
         &market_asset,
-        binance_tx,
-        binance_history.clone(),
+        clock.clone(),
         config.feeds_binance_history_ms(market_window_secs),
-    );
-    spawn_coinbase_ws(&market_asset, coinbase_tx);
-
-    let chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
-    spawn_chainlink_ws(
-        market_asset.clone(),
-        chainlink_tx,
-        chainlink_history.clone(),
+    ));
+    let coinbase_feed = Arc::new(adapters::coinbase::CoinbaseAdapter::spawn(
+        &market_asset,
+        clock.clone(),
+    ));
+    let chainlink_feed = Arc::new(adapters::chainlink::ChainlinkAdapter::spawn(
+        &market_asset,
         config.feeds_chainlink_history_ms(market_window_secs),
+    ));
+
+    // --- Market price adapter (per-market bid/ask WS) ---
+    let market_price = Arc::new(adapters::polymarket_price::PolymarketPriceAdapter::new());
+
+    // --- Exchange adapter (order signing + submission) ---
+    let exchange = Arc::new(
+        adapters::polymarket_order::PolymarketOrderAdapter::new(
+            secrets.polygon_private_key.as_deref(),
+        )
+        .await,
     );
 
-    // --- Strategy engine ---
+    // --- Market discovery adapter ---
+    let discovery = Arc::new(adapters::polymarket_discovery::GammaDiscoveryAdapter::new(
+        clock.clone(),
+    ));
+
+    // --- Strategy engine (depends only on port traits) ---
     let mut engine = StrategyEngine::new(
-        paper_mode,
         &config.engine_strategy,
-        binance_rx,
-        coinbase_rx,
-        chainlink_rx,
-        shared_market,
-        binance_history,
-        chainlink_history,
+        binance_feed,
+        coinbase_feed,
+        chainlink_feed,
+        market_price,
+        exchange,
+        discovery,
+        Arc::new(notion),
+        clock,
         budget,
     );
-
-    if let Some(pk) = secrets.polygon_private_key {
-        engine.authenticate(&pk).await;
-    }
 
     // --- Graceful shutdown ---
     let mut sigterm =
@@ -133,7 +137,6 @@ async fn async_main(config: AppConfig) {
             config.market_interval_minutes,
             config.market_resolve_strike_price,
             config.tick_interval_us(),
-            &notion,
         ) => None,
         _ = tokio::signal::ctrl_c() => Some("SIGINT"),
         _ = sigterm.recv() => Some("SIGTERM"),
@@ -145,7 +148,7 @@ async fn async_main(config: AppConfig) {
 }
 
 // ---------------------------------------------------------------------------
-// Telegram commands
+// Telegram commands (inbound adapter handler)
 // ---------------------------------------------------------------------------
 
 fn bot_budget_command(budget: &Arc<Mutex<f64>>, args: &str) -> String {
