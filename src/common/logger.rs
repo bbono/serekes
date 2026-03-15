@@ -1,3 +1,5 @@
+use env_logger::fmt::style::{AnsiColor, Style};
+use log::Level;
 use std::io::Write;
 
 pub fn init(bot_name: &str, level: &str) {
@@ -8,8 +10,28 @@ pub fn init(bot_name: &str, level: &str) {
         .format(move |buf, record| {
             let level = record.level();
             let module = record.module_path().unwrap_or("unknown");
+            let style = level_style(level);
 
-            writeln!(buf, "{} {} {} {:5} {}", buf.timestamp(), bot_name, module, level, record.args())
+            writeln!(
+                buf,
+                "{} {} {} {style}{:5}{style:#} {}",
+                buf.timestamp(),
+                bot_name,
+                module,
+                level,
+                record.args()
+            )
         })
         .init();
+}
+
+fn level_style(level: Level) -> Style {
+    let color = match level {
+        Level::Error => AnsiColor::Red,
+        Level::Warn => AnsiColor::Yellow,
+        Level::Info => AnsiColor::Green,
+        Level::Debug => AnsiColor::Blue,
+        Level::Trace => AnsiColor::Cyan,
+    };
+    Style::new().fg_color(Some(color.into()))
 }

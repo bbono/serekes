@@ -1,24 +1,15 @@
 # ─── Security ────────────────────────────────────────────────────────────────
 
-# Whether to empty secret files (polygon private key, telegram bot token)
-# after reading them at startup, so secrets do not remain on disk.
-# Set to false during development to avoid re-creating the files each run.
+# Path to the secrets file (TOML) containing all sensitive keys/tokens.
+# See secrets.example.toml for the expected format.
+# Default: "secrets.toml"
+secrets_file = "secrets.toml"
+
+# Whether to empty the secrets file after reading it at startup,
+# so secrets do not remain on disk.
+# Set to false during development to avoid re-creating the file each run.
 # Default: true
-truncate_secret_files = false
-
-# Path to a file containing the Polygon wallet private key (hex string).
-# If the file exists and contains a valid key, the bot runs in LIVE mode
-# (real on-chain orders on Polymarket). If the file is missing or empty,
-# the bot runs in PAPER mode (simulated fills, no real trades).
-# Default: ".key"
-bot_polygon_private_key_file = ".key"
-
-# Path to a file containing the Telegram Bot API token from @BotFather.
-# The bot uses Telegram for sending trade notifications and accepting
-# commands (/budget). Required — bot will not start if the file is
-# missing or empty.
-# Default: ".tg-token"
-bot_telegram_bot_token_file = ".tg-token"
+truncate_secrets_file = false
 
 # ─── Bot ─────────────────────────────────────────────────────────────────────
 
@@ -50,6 +41,13 @@ bot_worker_threads = 3
 # 1000 = once per millisecond, 20 = once per 50ms.
 # Default: 1000
 bot_engine_ticks_per_second = 1000
+
+# ─── Notion ──────────────────────────────────────────────────────────────────
+
+# Notion database ID where the bot logs market events (trades, skips).
+# Find it in the database URL: notion.so/<database_id>?v=...
+# If empty, Notion logging is disabled.
+notion_database_id = "32464c09673d80ffa7bac35c983dcbf7"
 
 # ─── Engine ──────────────────────────────────────────────────────────────────
 
@@ -87,13 +85,15 @@ market_resolve_strike_price = false
 # Log level filter using env_logger syntax. Accepts a single global level
 # or comma-separated per-module overrides.
 # Levels: "error", "warn", "info", "debug", "trace"
-# Modules: serekes::bot, serekes::engine, serekes::strategy::bono
+# Modules: serekes (main), serekes::engine, serekes::strategy,
+#          serekes::feeds, serekes::telegram, serekes::notion, serekes::common
 # Examples:
-#   "info"                       — everything at info
-#   "warn,serekes::engine=debug" — engine at debug, rest at warn
-#   "info,serekes::bot=warn"     — bot quieter, rest at info
+#   "info"                          — everything at info
+#   "warn,serekes::engine=debug"    — engine at debug, rest at warn
+#   "info,serekes::feeds=warn"      — feeds quieter, rest at info
+#   "info,serekes=debug"            — all bot modules at debug
 # Default: "info"
-logger_level = "info"
+logger_level = "serekes=debug"
 
 # ─── Feeds ───────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 mod common;
 mod engine;
 mod feeds;
+mod notion;
 mod strategy;
 mod telegram;
 mod types;
@@ -11,6 +12,7 @@ use polymarket_client_sdk::auth::Signer as _;
 use polymarket_client_sdk::clob::types::SignatureType;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
 use polymarket_client_sdk::POLYGON;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -43,19 +45,48 @@ fn main() {
 }
 
 async fn async_main(config: AppConfig) {
-
     let market_asset = config.market_asset.to_lowercase();
-    let (private_key, tg_token) = config.load_secrets();
-    if tg_token.is_none() {
-        error!("Telegram bot token file '{}' is missing or empty", config.bot_telegram_bot_token_file);
+    let secrets = config.load_secrets();
+    if secrets.telegram_bot_token.is_none() {
+        error!(
+            "telegram_bot_token missing in secrets file '{}'",
+            config.secrets_file
+        );
         std::process::exit(1);
     }
-    let paper_mode = private_key.is_none();
+    let paper_mode = secrets.polygon_private_key.is_none();
     let mode = if paper_mode { "paper" } else { "live" };
-    debug!("Starting asset={} mode={}", market_asset.to_uppercase(), mode);
+
+    // --- Budget (shared, safe to update at runtime) ---
+    let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot_initial_budget));
+
+    debug!(
+        "Starting asset={} mode={}",
+        market_asset.to_uppercase(),
+        mode
+    );
 
     // --- Time synchronization (before anything that uses now_ms) ---
     common::time::fetch_time_offset_ms().await;
+
+    // --- Telegram ---
+    let mut cmds = telegram::commands::Commands::new();
+    let budget_ref = budget.clone();
+    cmds.register("budget", "Budget", move |args| {
+        bot_budget_command(&budget_ref, args)
+    });
+    let tg = telegram::spawn(
+        secrets.telegram_bot_token,
+        config.bot_telegram_chat_id,
+        cmds.build(),
+    );
+
+    // --- Notion ---
+    let notion = notion::spawn(
+        secrets.notion_integration_secret,
+        &config.notion_database_id,
+        &config.bot_name,
+    );
 
     // --- Data broadcast channels ---
     let (binance_tx, binance_rx) = watch::channel((0.0f64, 0i64));
@@ -83,9 +114,6 @@ async fn async_main(config: AppConfig) {
         config.feeds_chainlink_history_ms(market_window_secs),
     );
 
-    // --- Budget (shared, safe to update at runtime) ---
-    let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot_initial_budget));
-
     // --- Strategy engine ---
     let mut engine = StrategyEngine::new(
         paper_mode,
@@ -99,19 +127,12 @@ async fn async_main(config: AppConfig) {
         budget.clone(),
     );
 
-    if let Some(pk) = private_key {
+    if let Some(pk) = secrets.polygon_private_key {
         if let Some((client, signer)) = authenticate_client(&pk).await {
             engine.set_client(client, signer);
             debug!("SDK authenticated");
         }
     }
-
-    // --- Telegram ---
-    let mut cmds = telegram::commands::Commands::new();
-    let budget_ref = budget.clone();
-    cmds.register("budget", "Budget", move |args| bot_budget_command(&budget_ref, args));
-    let tg = telegram::spawn(tg_token, config.bot_telegram_chat_id, cmds.build());
-    tg.send(format!("{} started.", config.bot_name));
 
     // --- Graceful shutdown ---
     let mut sigterm =
@@ -130,6 +151,7 @@ async fn async_main(config: AppConfig) {
             &chainlink_history,
             &binance_history,
             config.tick_interval_us(),
+            &notion,
         ) => None,
         _ = tokio::signal::ctrl_c() => Some("SIGINT"),
         _ = sigterm.recv() => Some("SIGTERM"),
@@ -153,6 +175,7 @@ async fn run_bot_loop(
     chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     tick_interval_us: u64,
+    notion: &notion::Notion,
 ) {
     wait_for_feeds(engine).await;
 
@@ -185,10 +208,14 @@ async fn run_bot_loop(
             }
         }
 
+        notion.save(&market.slug, HashMap::from([("status", "trading")]));
+
         let price_handle = connect_poly_price_ws(shared_market, &market).await;
         trade_market(engine, &market, tick_interval_us).await;
         engine.clear_state();
         price_handle.abort();
+
+        notion.save(&market.slug, HashMap::from([("status", "completed")]));
         // Wait for another market
         let remaining_ms = market.expires_at_ms.saturating_sub(common::time::now_ms());
         if remaining_ms > 0 {
@@ -202,7 +229,11 @@ async fn run_bot_loop(
 // ---------------------------------------------------------------------------
 
 async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interval_us: u64) {
-    debug!("Trading market {} (expires in {:.0}s)", market.slug, market.time_to_expire_ms() as f64 / 1000.0);
+    debug!(
+        "Trading market {} (expires in {:.0}s)",
+        market.slug,
+        market.time_to_expire_ms() as f64 / 1000.0
+    );
     let mut trade_count = 0usize;
     loop {
         if common::time::now_ms() > market.expires_at_ms + 1000 {
@@ -220,7 +251,10 @@ async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interva
         }
         tokio::time::sleep(Duration::from_micros(tick_interval_us)).await;
     }
-    debug!("Trading completed. Market {} ({} trades)", market.slug, trade_count);
+    debug!(
+        "Trading completed. Market {} ({} trades)",
+        market.slug, trade_count
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +280,6 @@ fn bot_budget_command(budget: &Arc<Mutex<f64>>, args: &str) -> String {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
 
 async fn authenticate_client(
     private_key: &str,

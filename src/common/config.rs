@@ -4,23 +4,25 @@ use std::fs;
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     // ─── Security ──────────────────────────────────────────────────────
+    #[serde(default = "default_secrets_file")]
+    pub secrets_file: String,
     #[serde(default = "default_true")]
-    pub truncate_secret_files: bool,
+    pub truncate_secrets_file: bool,
 
     // ─── Bot ─────────────────────────────────────────────────────────
     pub bot_name: String,
-    #[serde(default = "default_key_file")]
-    pub bot_polygon_private_key_file: String,
     #[serde(default)]
     pub bot_initial_budget: f64,
     #[serde(default = "default_worker_threads")]
     pub bot_worker_threads: usize,
     #[serde(default = "default_engine_ticks_per_second")]
     pub bot_engine_ticks_per_second: u32,
-    #[serde(default = "default_bot_token_file")]
-    pub bot_telegram_bot_token_file: String,
     #[serde(default)]
     pub bot_telegram_chat_id: i64,
+
+    // ─── Notion ─────────────────────────────────────────────────────
+    #[serde(default)]
+    pub notion_database_id: String,
 
     // ─── Market ──────────────────────────────────────────────────────
     #[serde(default = "default_asset")]
@@ -42,6 +44,17 @@ pub struct AppConfig {
     pub engine_strategy: String,
 }
 
+/// Secrets loaded from secrets.toml at startup.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Secrets {
+    #[serde(default)]
+    pub polygon_private_key: Option<String>,
+    #[serde(default)]
+    pub telegram_bot_token: Option<String>,
+    #[serde(default)]
+    pub notion_integration_secret: Option<String>,
+}
+
 impl AppConfig {
     pub fn load(path: &str) -> Self {
         let content = fs::read_to_string(path)
@@ -57,13 +70,32 @@ impl AppConfig {
         1_000_000 / self.bot_engine_ticks_per_second as u64
     }
 
-    /// Load all secrets from their files. Returns (private_key, telegram_token).
-    /// When truncate_secret_files is true, files are emptied after reading.
-    pub fn load_secrets(&self) -> (Option<String>, Option<String>) {
-        let truncate = self.truncate_secret_files;
-        let private_key = load_secret_file(&self.bot_polygon_private_key_file, truncate);
-        let tg_token = load_secret_file(&self.bot_telegram_bot_token_file, truncate);
-        (private_key, tg_token)
+    /// Load secrets from the secrets file.
+    /// When truncate_secrets_file is true, the file is emptied after reading.
+    pub fn load_secrets(&self) -> Secrets {
+        let content = match fs::read_to_string(&self.secrets_file) {
+            Ok(c) => c,
+            Err(_) => {
+                log::debug!("Secrets file not found: {}", self.secrets_file);
+                return Secrets {
+                    polygon_private_key: None,
+                    telegram_bot_token: None,
+                    notion_integration_secret: None,
+                };
+            }
+        };
+
+        let secrets: Secrets = toml::from_str(&content)
+            .unwrap_or_else(|e| panic!("Failed to parse {}: {}", self.secrets_file, e));
+
+        if self.truncate_secrets_file {
+            let _ = fs::write(&self.secrets_file, "");
+            log::debug!("Loaded secrets from {} (file truncated)", self.secrets_file);
+        } else {
+            log::debug!("Loaded secrets from {}", self.secrets_file);
+        }
+
+        secrets
     }
 
     pub fn feeds_binance_history_ms(&self, default_secs: i64) -> i64 {
@@ -83,10 +115,6 @@ impl AppConfig {
 
         if self.bot_name.trim().is_empty() {
             errors.push("'bot_name' is required and must not be empty".into());
-        }
-
-        if self.bot_polygon_private_key_file.trim().is_empty() {
-            errors.push("bot_polygon_private_key_file must not be empty".into());
         }
 
         let valid_levels = ["error", "warn", "info", "debug", "trace"];
@@ -156,32 +184,8 @@ impl AppConfig {
     }
 }
 
-fn load_secret_file(path: &str, truncate: bool) -> Option<String> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => {
-            let value = contents.trim().to_string();
-            if value.is_empty() {
-                None
-            } else {
-                if truncate {
-                    let _ = std::fs::write(path, "");
-                    log::debug!("Loaded secret from {} (file truncated)", path);
-                } else {
-                    log::debug!("Loaded secret from {}", path);
-                }
-                Some(value)
-            }
-        }
-        Err(_) => {
-            log::debug!("Secret file not found: {}", path);
-            None
-        }
-    }
-}
-
 fn default_true() -> bool { true }
-fn default_bot_token_file() -> String { ".tg-token".to_string() }
-fn default_key_file() -> String { ".key".to_string() }
+fn default_secrets_file() -> String { "secrets.toml".to_string() }
 fn default_log_level() -> String { "info".to_string() }
 fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }

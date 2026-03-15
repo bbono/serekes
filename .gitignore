@@ -6,5 +6,4 @@ target/
 *.log
 
 .lock
-.key
-.tg-token
+secrets.toml
