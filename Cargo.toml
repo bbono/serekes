@@ -25,13 +25,18 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
 panic = 'abort'
 opt-level = 3
 strip = true
 
-[profile.profiling]
-inherits = "release"    # same perf settings as release
-strip = false           # ← override: keep symbols
-debug = true
+[profile.dev]
+opt-level = 0
+debug = 2
+incremental = true
+codegen-units = 256
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
