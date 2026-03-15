@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub bot_name: String,
     #[serde(default)]
     pub bot_initial_budget: f64,
+    #[serde(default = "default_min_trading_budget")]
+    pub bot_min_trading_budget: f64,
     #[serde(default = "default_worker_threads")]
     pub bot_worker_threads: usize,
     #[serde(default = "default_engine_ticks_per_second")]
@@ -151,10 +153,10 @@ impl AppConfig {
             ));
         }
 
-        let valid_strategies = ["bono", "konzerva"];
+        let valid_strategies = ["lag_exploiter", "spender"];
         if !valid_strategies.contains(&self.engine_strategy.as_str()) {
             errors.push(format!(
-                "Invalid engine_strategy: '{}'. Supported: bono, konzerva",
+                "Invalid engine_strategy: '{}'. Supported: lag_exploiter, spender",
                 self.engine_strategy
             ));
         }
@@ -194,3 +196,4 @@ fn default_interval() -> u32 { 5 }
 fn default_worker_threads() -> usize { 2 }
 fn default_engine_ticks_per_second() -> u32 { 1000 }
 fn default_polymarket_resolver_interval_secs() -> u64 { 60 }
+fn default_min_trading_budget() -> f64 { 1.0 }

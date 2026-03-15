@@ -47,9 +47,10 @@ async fn async_main(config: AppConfig) {
     let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot_initial_budget));
 
     info!(
-        "Starting asset={} mode={}",
+        "Starting asset={} mode={} strategy={}",
         market_asset.to_uppercase(),
-        mode
+        mode,
+        config.engine_strategy
     );
 
     // --- Clock adapter (must be first — everything depends on synced time) ---
@@ -62,7 +63,7 @@ async fn async_main(config: AppConfig) {
     cmds.register("budget", "Budget", move |args| {
         bot_budget_command(&budget_ref, args)
     });
-    let _tg = adapters::telegram::TelegramAdapter::spawn(
+    let tg = adapters::telegram::TelegramAdapter::spawn(
         secrets.telegram_bot_token,
         config.bot_telegram_chat_id,
         cmds.build(),
@@ -124,8 +125,10 @@ async fn async_main(config: AppConfig) {
         exchange,
         discovery,
         Arc::new(notion),
+        Arc::new(tg),
         clock,
         budget,
+        config.bot_min_trading_budget,
     );
 
     // --- Graceful shutdown ---

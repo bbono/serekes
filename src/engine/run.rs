@@ -18,7 +18,27 @@ impl StrategyEngine {
     ) {
         self.wait_for_feeds().await;
 
+        let mut low_budget_notified = false;
         loop {
+            // Skip market entirely if budget is below minimum — no point ticking.
+            let current_budget = *self.budget.lock().unwrap_or_else(|e| e.into_inner());
+            if current_budget < self.min_trading_budget {
+                warn!(
+                    "Budget {:.2} below minimum {:.2}. Waiting for top-up...",
+                    current_budget, self.min_trading_budget
+                );
+                if !low_budget_notified {
+                    self.notification.send(format!(
+                        "No budget. Current: {:.2} USDC, minimum: {:.2} USDC. Use /budget to top up.",
+                        current_budget, self.min_trading_budget
+                    ));
+                    low_budget_notified = true;
+                }
+                sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+            low_budget_notified = false;
+
             let mut market = self.discovery.discover(asset, interval_minutes).await;
             info!("Market discovered: {}", market.slug);
 

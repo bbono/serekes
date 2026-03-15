@@ -24,6 +24,11 @@ bot_name = "bono"
 # Default: 0.00
 bot_initial_budget = 4.00
 
+# Minimum budget required to enter a market. If current budget is below
+# this, the bot skips markets and waits for a top-up via /budget.
+# Default: 1.00
+bot_min_trading_budget = 1.00
+
 # Your personal Telegram chat ID. The bot sends all notifications to this
 # chat and only processes commands received from it. Messages from any
 # other chat are silently ignored. Use @userinfobot to find your chat ID.
@@ -57,9 +62,9 @@ polymarket_resolver_interval_secs = 5
 
 # Trading strategy to use. Each strategy implements different logic for
 # deciding when, in which direction, and at what price to place orders.
-# Supported: "bono", "konzerva"
+# Supported: "lag_exploiter"
 # Required — bot will not start without it. No default.
-engine_strategy = "bono"
+engine_strategy = "spender"
 
 # ─── Market ──────────────────────────────────────────────────────────────────
 
@@ -82,7 +87,7 @@ market_interval_minutes = 5
 # history buffers; if no strike is found, the market is skipped.
 # Set to false for strategies that don't need a strike price.
 # Default: true
-market_resolve_strike_price = true
+market_resolve_strike_price = false
 
 # ─── Logger ──────────────────────────────────────────────────────────────────
 

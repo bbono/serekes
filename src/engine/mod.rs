@@ -2,18 +2,24 @@ mod order;
 mod run;
 
 use crate::domain::strategy::Strategy;
-use crate::domain::strategy::{BonoStrategy, KonzervaStrategy};
+use crate::domain::strategy::{LagExploiterStrategy, SpenderStrategy};
 use crate::domain::{Market, TickContext, TickResult, Trade};
-use crate::ports::{ClockPort, ExchangePort, MarketDiscoveryPort, MarketPricePort, PersistencePort, PriceFeedPort};
+use crate::ports::{
+    ClockPort, ExchangePort, MarketDiscoveryPort, MarketPricePort, NotificationPort, PersistencePort,
+    PriceFeedPort,
+};
 use log::{info, warn};
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
 fn create_strategy(name: &str) -> Box<dyn Strategy> {
     match name {
-        "bono" => Box::new(BonoStrategy::new()),
-        "konzerva" => Box::new(KonzervaStrategy::new()),
-        _ => panic!("Unknown strategy: '{}'. Supported: bono, konzerva", name),
+        "lag_exploiter" => Box::new(LagExploiterStrategy::new()),
+        "spender" => Box::new(SpenderStrategy::new()),
+        _ => panic!(
+            "Unknown strategy: '{}'. Supported: lag_exploiter, spender",
+            name
+        ),
     }
 }
 
@@ -28,6 +34,7 @@ pub struct StrategyEngine {
     exchange: Arc<dyn ExchangePort>,
     discovery: Arc<dyn MarketDiscoveryPort>,
     persistence: Arc<dyn PersistencePort>,
+    notification: Arc<dyn NotificationPort>,
     clock: Arc<dyn ClockPort>,
 
     // --- Per-market state ---
@@ -35,6 +42,7 @@ pub struct StrategyEngine {
 
     // Budget (USDC), shared — safe to read/write from anywhere
     budget: Arc<Mutex<f64>>,
+    min_trading_budget: f64,
 }
 
 impl StrategyEngine {
@@ -47,8 +55,10 @@ impl StrategyEngine {
         exchange: Arc<dyn ExchangePort>,
         discovery: Arc<dyn MarketDiscoveryPort>,
         persistence: Arc<dyn PersistencePort>,
+        notification: Arc<dyn NotificationPort>,
         clock: Arc<dyn ClockPort>,
         budget: Arc<Mutex<f64>>,
+        min_trading_budget: f64,
     ) -> Self {
         let strategy = create_strategy(strategy_name);
         Self {
@@ -60,9 +70,11 @@ impl StrategyEngine {
             exchange,
             discovery,
             persistence,
+            notification,
             clock,
             trades: Vec::new(),
             budget,
+            min_trading_budget,
         }
     }
 
@@ -103,7 +115,7 @@ impl StrategyEngine {
             traded,
             trades: self.trades.clone(),
             timestamp_ms,
-            completed: budget < 1.0,
+            completed: budget < self.min_trading_budget,
         }
     }
 
@@ -116,10 +128,14 @@ impl StrategyEngine {
         let mut binance_strike = 0.0f64;
         loop {
             if chainlink_strike == 0.0 {
-                chainlink_strike = self.chainlink_feed.lookup_history(market.started_at_ms, true);
+                chainlink_strike = self
+                    .chainlink_feed
+                    .lookup_history(market.started_at_ms, true);
             }
             if binance_strike == 0.0 {
-                binance_strike = self.binance_feed.lookup_history(market.started_at_ms, false);
+                binance_strike = self
+                    .binance_feed
+                    .lookup_history(market.started_at_ms, false);
             }
             if chainlink_strike > 0.0 && binance_strike > 0.0 {
                 return Some((chainlink_strike, binance_strike));
@@ -128,8 +144,16 @@ impl StrategyEngine {
                 warn!(
                     "Strike resolution timed out for {}: chainlink={} binance={}",
                     market.slug,
-                    if chainlink_strike > 0.0 { format!("{:.2}", chainlink_strike) } else { "missing".into() },
-                    if binance_strike > 0.0 { format!("{:.2}", binance_strike) } else { "missing".into() },
+                    if chainlink_strike > 0.0 {
+                        format!("{:.2}", chainlink_strike)
+                    } else {
+                        "missing".into()
+                    },
+                    if binance_strike > 0.0 {
+                        format!("{:.2}", binance_strike)
+                    } else {
+                        "missing".into()
+                    },
                 );
                 return None;
             }
