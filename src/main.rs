@@ -1,9 +1,7 @@
 mod common;
 mod engine;
-mod feeds;
-mod notion;
+mod integrations;
 mod strategy;
-mod telegram;
 mod types;
 
 use alloy_signer_local::{LocalSigner, PrivateKeySigner};
@@ -21,7 +19,7 @@ use tokio::time::{sleep, Duration};
 
 use common::config::AppConfig;
 use engine::StrategyEngine;
-use feeds::{
+use integrations::{
     connect_poly_price_ws, discover_market, resolve_strike_prices, spawn_binance_ws,
     spawn_chainlink_ws, spawn_coinbase_ws,
 };
@@ -70,23 +68,28 @@ async fn async_main(config: AppConfig) {
     common::time::fetch_time_offset_ms().await;
 
     // --- Telegram ---
-    let mut cmds = telegram::commands::Commands::new();
+    let mut cmds = integrations::telegram::Commands::new();
     let budget_ref = budget.clone();
     cmds.register("budget", "Budget", move |args| {
         bot_budget_command(&budget_ref, args)
     });
-    let tg = telegram::spawn(
+    let tg = integrations::telegram::spawn(
         secrets.telegram_bot_token,
         config.bot_telegram_chat_id,
         cmds.build(),
     );
 
     // --- Notion ---
-    let notion = notion::spawn(
+    let (notion, notion_api) = integrations::notion::spawn(
         secrets.notion_integration_secret,
         &config.notion_database_id,
         &config.bot_name,
     );
+
+    // --- Polymarket resolver ---
+    if let Some(api) = notion_api {
+        integrations::polymarket::spawn_resolver(api, config.polymarket_resolver_interval_secs);
+    }
 
     // --- Data broadcast channels ---
     let (binance_tx, binance_rx) = watch::channel((0.0f64, 0i64));
@@ -175,7 +178,7 @@ async fn run_bot_loop(
     chainlink_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     binance_history: &Arc<Mutex<VecDeque<(f64, i64)>>>,
     tick_interval_us: u64,
-    notion: &notion::Notion,
+    notion: &integrations::notion::Notion,
 ) {
     wait_for_feeds(engine).await;
 

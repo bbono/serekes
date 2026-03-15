@@ -23,6 +23,8 @@ pub struct AppConfig {
     // ─── Notion ─────────────────────────────────────────────────────
     #[serde(default)]
     pub notion_database_id: String,
+    #[serde(default = "default_polymarket_resolver_interval_secs")]
+    pub polymarket_resolver_interval_secs: u64,
 
     // ─── Market ──────────────────────────────────────────────────────
     #[serde(default = "default_asset")]
@@ -191,3 +193,4 @@ fn default_asset() -> String { "btc".to_string() }
 fn default_interval() -> u32 { 5 }
 fn default_worker_threads() -> usize { 2 }
 fn default_engine_ticks_per_second() -> u32 { 1000 }
+fn default_polymarket_resolver_interval_secs() -> u64 { 60 }

@@ -49,6 +49,10 @@ bot_engine_ticks_per_second = 1000
 # If empty, Notion logging is disabled.
 notion_database_id = "32464c09673d80ffa7bac35c983dcbf7"
 
+# How often (in seconds) the resolver checks completed markets for resolution.
+# Default: 60
+polymarket_resolver_interval_secs = 5
+
 # ─── Engine ──────────────────────────────────────────────────────────────────
 
 # Trading strategy to use. Each strategy implements different logic for
@@ -86,16 +90,18 @@ market_resolve_strike_price = false
 # or comma-separated per-module overrides.
 # Levels: "error", "warn", "info", "debug", "trace"
 # Modules: serekes (main), serekes::engine, serekes::strategy,
-#          serekes::feeds, serekes::telegram, serekes::notion, serekes::common
+#          serekes::integrations, serekes::integrations::polymarket,
+#          serekes::integrations::telegram, serekes::integrations::notion,
+#          serekes::common
 # Examples:
-#   "info"                          — everything at info
-#   "warn,serekes::engine=debug"    — engine at debug, rest at warn
-#   "info,serekes::feeds=warn"      — feeds quieter, rest at info
-#   "info,serekes=debug"            — all bot modules at debug
+#   "info"                                      — everything at info
+#   "warn,serekes::engine=debug"                — engine at debug, rest at warn
+#   "info,serekes::integrations=warn"           — integrations quieter, rest at info
+#   "info,serekes=debug"                        — all bot modules at debug
 # Default: "info"
-logger_level = "serekes=debug"
+logger_level = "debug"
 
-# ─── Feeds ───────────────────────────────────────────────────────────────────
+# ─── Integrations (Feeds) ─────────────────────────────────────────────────────
 
 # Price history buffer sizes in seconds. The bot keeps a rolling window
 # of recent prices for each feed. Entries older than the window are evicted.

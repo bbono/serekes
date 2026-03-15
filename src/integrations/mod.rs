@@ -1,7 +1,9 @@
 mod binance;
 mod chainlink;
 mod coinbase;
+pub mod notion;
 pub mod polymarket;
+pub mod telegram;
 
 pub use binance::spawn_binance_ws;
 pub use chainlink::spawn_chainlink_ws;

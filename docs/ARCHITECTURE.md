@@ -8,13 +8,16 @@ Serekes is a Rust trading bot that trades binary Up/Down prediction markets on P
 
 ```mermaid
 graph TD
-    subgraph INFRA["INFRASTRUCTURE LAYER"]
+    subgraph INTEGRATIONS["INTEGRATIONS LAYER"]
         BIN_WS["Binance WS<br/>(aggTrade)"]
         CB_WS["Coinbase WS<br/>(ticker)"]
         CL_WS["Chainlink WS<br/>(oracle)"]
         PM_WS["Polymarket<br/>Price WS"]
         SYNC["Time Sync<br/>(CLOB server)"]
         CHANNELS["tokio::sync::watch channels<br/>Arc&lt;Mutex&lt;VecDeque&gt;&gt; histories<br/>Arc&lt;Mutex&lt;Option&lt;Arc&lt;Market&gt;&gt;&gt;&gt; shared state"]
+        TG["Telegram Bot<br/>(dedicated thread)"]
+        NOTION["Notion<br/>(background worker)"]
+        RESOLVER["Polymarket Resolver<br/>(background task)"]
     end
 
     BIN_WS & CB_WS & CL_WS & PM_WS & SYNC --> CHANNELS
@@ -36,7 +39,6 @@ graph TD
     TRAIT --> BIZ
 
     subgraph SUPPORT["SUPPORT SERVICES"]
-        TG["Telegram Bot<br/>(dedicated thread)"]
         MD["Market Discovery<br/>(Gamma API)"]
         BUDGET["Budget Manager<br/>Arc&lt;Mutex&lt;f64&gt;&gt;"]
         SECRETS["Secret Loader<br/>(load + optional truncate)"]
@@ -48,12 +50,16 @@ graph TD
         E_CB["Coinbase<br/>WS"]
         E_PM["Polymarket<br/>CLOB+Gamma"]
         E_TG["Telegram<br/>Bot API"]
+        E_NOTION["Notion<br/>API"]
     end
 
     E_BIN --> BIN_WS
     E_CB --> CB_WS
     E_PM --> PM_WS
+    E_PM --> RESOLVER
     E_TG --> TG
+    E_NOTION --> NOTION
+    E_NOTION --> RESOLVER
 ```
 
 ## Module Structure
@@ -62,28 +68,38 @@ graph TD
 graph LR
     SRC["src/"] --> MAIN["main.rs<br/>Entry point: main(), runtime setup,<br/>secret loading, bot loop, market rotation"]
     SRC --> COMMON["common/<br/>config.rs, logger.rs, time.rs"]
-    SRC --> FEEDS["feeds/<br/>binance.rs, coinbase.rs,<br/>chainlink.rs, polymarket.rs"]
+    SRC --> INT["integrations/<br/>mod.rs (re-exports + shared helpers)"]
+    INT --> BIN["binance.rs"]
+    INT --> CB["coinbase.rs"]
+    INT --> CL["chainlink.rs"]
+    INT --> PM["polymarket.rs<br/>(discovery, price WS, resolver)"]
+    INT --> TG["telegram.rs<br/>(bot, commands, outbound/inbound)"]
+    INT --> NOTION["notion.rs<br/>(save worker, upsert)"]
     SRC --> ENG["engine/<br/>mod.rs (StrategyEngine, snapshot)<br/>order.rs (try_order, sign+submit)"]
     SRC --> STRAT["strategy/<br/>mod.rs, bono.rs, konzerva.rs"]
-    SRC --> TG["telegram/<br/>mod.rs (spawn, outbound/inbound loops)<br/>commands.rs (command routing)"]
     SRC --> TYP["types/<br/>market.rs, tick_context.rs, order.rs<br/>Domain types + Strategy trait"]
 ```
 
 ## Layer Responsibilities
 
-### Infrastructure Layer (`main.rs` + `feeds/`)
+### Integrations Layer (`integrations/`)
 
-- Configurable tokio runtime (`bot_worker_threads` in config, default 2)
-- Secret loading at startup: polygon private key + telegram bot token from files
-  - `truncate_secret_files` controls whether files are emptied after reading
+- **Binance** (`binance.rs`): aggTrade WebSocket, price history buffering
+- **Coinbase** (`coinbase.rs`): ticker WebSocket
+- **Chainlink** (`chainlink.rs`): Polymarket live-data WS, oracle price history
+- **Polymarket** (`polymarket.rs`): market discovery (Gamma API), per-market price WS, strike price resolution, background market resolver
+- **Telegram** (`telegram.rs`): dedicated OS thread with own tokio runtime, outbound message queue with retry, inbound long-polling with owner-only filtering, command registration and routing
+- **Notion** (`notion.rs`): background save worker via mpsc channel, upsert by Name, auto-populates created/updated dates and market URL
+
+Shared helpers in `mod.rs`: exponential backoff, price history push, JSON parsing.
+
+### Infrastructure (`main.rs` + `common/`)
+
+- Configurable tokio runtime (`bot_worker_threads`, default 2)
+- Secret loading at startup from `secrets.toml` (polygon private key, telegram bot token, notion secret)
+  - `truncate_secrets_file` controls whether the file is emptied after reading
   - Missing telegram token → error + exit
   - Missing private key → PAPER mode
-- WebSocket lifecycle management (connect, reconnect, backoff)
-- Data feed parsing (Binance aggTrade, Coinbase ticker, Chainlink oracle)
-- Price history buffering (ring buffers via VecDeque, time-windowed eviction)
-- Data broadcast via `tokio::sync::watch` channels
-- Market discovery via Polymarket Gamma API
-- Strike price resolution from history buffers (Chainlink exact match + Binance `<=` match)
 - Time synchronization with Polymarket server
 - Configurable tick rate (`bot_engine_ticks_per_second`, converted to microsecond sleep interval)
 - Graceful shutdown (SIGINT/SIGTERM)
@@ -109,11 +125,10 @@ graph LR
 
 ### Support Services
 
-- **Config** (`common/config.rs`): Flat TOML deserialization with defaults and validation. All keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`). Security keys (`truncate_secret_files`) have no prefix.
-- **Logger** (`common/logger.rs`): Always shows timestamp, bot name, module path, level, and message.
+- **Config** (`common/config.rs`): Flat TOML deserialization with defaults and validation. All keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`, `notion_`). Security keys (`secrets_file`, `truncate_secrets_file`) have no prefix.
+- **Logger** (`common/logger.rs`): Always shows timestamp, bot name, module path, colored level, and message.
 - **Time** (`common/time.rs`): Server-synced `now_ms()` with Polymarket offset
 - **Types** (`types/`): Shared domain types (`Market`, `TickContext`, `TokenDirection`, `OrderIntent`, `Trade`, `Strategy` trait)
-- **Telegram** (`telegram/`): Dedicated OS thread with own tokio runtime, command routing, outbound message queue with retry, inbound long-polling with owner-only filtering by `bot_telegram_chat_id`
 - **Budget**: `Arc<Mutex<f64>>` shared between engine and Telegram commands — queryable/settable at runtime
 
 ## Concurrency Model
@@ -126,7 +141,9 @@ The bot uses **Tokio** with a configurable multi-threaded runtime:
 - **Main task** — runs the market rotation loop synchronously (discover → tick → cleanup → repeat)
 - **Tick loop** — sleeps `1_000_000 / bot_engine_ticks_per_second` microseconds between ticks. Default 1000 ticks/sec (1ms).
 - **Telegram thread** — dedicated OS thread with single-threaded tokio runtime, fully isolated from the engine runtime. Runs outbound message queue and inbound command polling concurrently.
-- **Communication** — `watch` channels for latest-value feeds, `Arc<Mutex<>>` for shared mutable state (market, budget)
+- **Notion worker** — tokio task processing save requests from an mpsc channel. Non-blocking from the caller's perspective.
+- **Polymarket resolver** — background tokio task that periodically checks completed markets for resolution via the Gamma API, updating Notion records.
+- **Communication** — `watch` channels for latest-value feeds, `Arc<Mutex<>>` for shared mutable state (market, budget), `mpsc` for Telegram/Notion message queues
 
 ## Data Flow
 
@@ -147,6 +164,7 @@ flowchart LR
     OI --> SE["StrategyEngine<br/>budget check → sign_and_submit()"]
     SE --> CLOB["Polymarket CLOB"]
     SE -->|deduct cost| BUDGET["Shared Budget"]
+    SE -->|save| NOTION["Notion<br/>(via mpsc)"]
 ```
 
 ## Key Design Decisions
@@ -165,9 +183,15 @@ flowchart LR
 
 7. **Failed order cooldown** — After a CLOB submission failure, the engine waits 3 seconds before attempting another order, preventing rapid-fire failures.
 
-8. **Secret file truncation** — By default (`truncate_secret_files = true`), the polygon private key and telegram bot token files are emptied after reading at startup, so secrets do not remain on disk. Disabled during development for convenience.
+8. **Secret file truncation** — By default (`truncate_secrets_file = true`), the secrets file is emptied after reading at startup, so secrets do not remain on disk. All secrets (polygon key, telegram token, notion secret) are stored in a single `secrets.toml` file.
 
-9. **Flat config** — All configuration lives in a single flat TOML file with no nested sections. Keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`), making it easy to grep and manage.
+9. **Flat config** — All configuration lives in a single flat TOML file with no nested sections. Keys are prefixed by their module (`bot_`, `market_`, `engine_`, `logger_`, `feeds_`, `notion_`), making it easy to grep and manage.
+
+10. **Unified integrations module** — All external service integrations (Binance, Coinbase, Chainlink, Polymarket, Telegram, Notion) live under a single `integrations/` module, keeping the top-level module structure clean.
+
+11. **Non-blocking Notion saves** — Notion API calls are queued via mpsc and processed by a background worker, so the trading engine is never blocked by network latency.
+
+12. **Polymarket resolver** — A background task periodically queries the Gamma API for completed market resolutions, automatically updating Notion records from "completed" to "resolved" with the winning outcome.
 
 ## External Dependencies
 
@@ -177,8 +201,7 @@ flowchart LR
 | `tokio` | Async runtime, channels, signals |
 | `tokio-tungstenite` | WebSocket connections (Binance, Coinbase, Chainlink) |
 | `teloxide` | Telegram Bot API client (long-polling, message sending, command menu) |
-| `reqwest` | HTTP client (Telegram via teloxide) |
+| `reqwest` | HTTP client (Telegram via teloxide, Notion API, Gamma API) |
 | `alloy-signer-local` | Polygon wallet signing |
 | `k256` | Secp256k1 cryptography |
 | `serde` / `toml` | Config deserialization |
-| `chrono` | Timestamp handling |

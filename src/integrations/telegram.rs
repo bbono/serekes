@@ -1,15 +1,11 @@
-pub mod commands;
-
 use log::{debug, error, warn};
+use std::collections::HashMap;
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, ParseMode, UpdateKind};
+use teloxide::types::{BotCommand, ChatId, ParseMode, UpdateKind};
 use tokio::sync::mpsc;
 
-
-
 /// Callback type for handling incoming commands.
-/// Receives (command, args) and returns an optional reply string.
 pub type CommandHandler = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
 
 /// Handle for sending messages to the configured Telegram chat.
@@ -26,7 +22,7 @@ impl Telegram {
 
 /// Spawns the Telegram bot on a dedicated OS thread with its own tokio runtime,
 /// fully isolated from the main engine runtime.
-pub fn spawn(bot_token: Option<String>, chat_id: i64, built: commands::Built) -> Telegram {
+pub fn spawn(bot_token: Option<String>, chat_id: i64, built: Built) -> Telegram {
     let (tx, rx) = mpsc::unbounded_channel::<String>();
 
     let bot_token = match bot_token {
@@ -152,4 +148,52 @@ fn escape_markdown(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+type Handler = Box<dyn Fn(&str) -> String + Send + Sync>;
+
+pub struct Commands {
+    handlers: HashMap<String, Handler>,
+    menu_commands: Vec<BotCommand>,
+}
+
+impl Commands {
+    pub fn new() -> Self {
+        Self {
+            handlers: HashMap::new(),
+            menu_commands: Vec::new(),
+        }
+    }
+
+    pub fn register(
+        &mut self,
+        cmd: &str,
+        description: &str,
+        handler: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) {
+        let name = cmd.strip_prefix('/').unwrap_or(cmd);
+        let key = format!("/{}", name);
+        self.handlers.insert(key, Box::new(handler));
+        self.menu_commands.push(BotCommand::new(name.to_string(), description));
+    }
+
+    pub fn build(self) -> Built {
+        let handlers = Arc::new(self.handlers);
+        let handler: CommandHandler = Arc::new(move |cmd: &str, args: &str| {
+            handlers.get(cmd).map(|h| h(args))
+        });
+        Built {
+            handler,
+            menu_commands: self.menu_commands,
+        }
+    }
+}
+
+pub struct Built {
+    pub handler: CommandHandler,
+    pub menu_commands: Vec<BotCommand>,
 }

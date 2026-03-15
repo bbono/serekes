@@ -3,40 +3,42 @@
 ## Startup (main.rs)
 
 1. Load `config.toml` — flat config, validate all fields
-2. Init logger with `bot_name` and `logger_level`
+2. Init logger with `bot_name` and `logger_level` (colored levels)
 3. Build tokio runtime with configurable `bot_worker_threads` (default 2)
-4. Load secrets from files: polygon private key + telegram bot token
-   - If `truncate_secret_files = true`, files are emptied after reading
+4. Load secrets from `secrets.toml`: polygon private key, telegram bot token, notion secret
+   - If `truncate_secrets_file = true`, the file is emptied after reading
    - If telegram token is missing → error + exit
    - If private key is missing → PAPER mode (no real trades)
-5. Sync server time offset with Polymarket CLOB
-6. Spawn 3 WebSocket feed tasks (all concurrent):
+5. Create shared budget (`Arc<Mutex<f64>>` from `bot_initial_budget`)
+6. Sync server time offset with Polymarket CLOB
+7. Start Telegram bot on dedicated thread — register commands, sync menu
+8. Start Notion background worker + Polymarket resolver
+9. Spawn 3 WebSocket feed tasks (all concurrent):
    - **Binance** — `aggTrade` stream → `binance_tx` + `binance_history` (primary price oracle)
    - **Coinbase** — `ticker` stream → `coinbase_tx` (secondary oracle)
    - **Chainlink** — Polymarket live-data WS → `chainlink_tx` + `chainlink_history` (settlement oracle)
-7. Create shared budget (`Arc<Mutex<f64>>` from `bot_initial_budget`)
-8. Build `StrategyEngine` with chosen strategy (`engine_strategy`) and shared budget
-9. Authenticate Polymarket SDK (if private key present → live mode)
-10. Start Telegram bot on dedicated thread — register commands, sync menu
-11. Wait for all feeds (Binance, Coinbase, Chainlink > 0) before entering main loop
+10. Build `StrategyEngine` with chosen strategy (`engine_strategy`) and shared budget
+11. Authenticate Polymarket SDK (if private key present → live mode)
+12. Wait for all feeds (Binance, Coinbase, Chainlink > 0) before entering main loop
 
 ```mermaid
 flowchart TD
     A["1. Load config.toml"] --> B["2. Init logger"]
     B --> C["3. Build tokio runtime<br/>(bot_worker_threads)"]
-    C --> D["4. Load secrets<br/>(private key + telegram token)<br/>truncate if configured"]
+    C --> D["4. Load secrets<br/>(private key + telegram token + notion secret)<br/>truncate if configured"]
     D --> D2{"Telegram token<br/>present?"}
     D2 -->|no| EXIT["Error + exit"]
-    D2 -->|yes| E["5. Sync time with Polymarket"]
-    E --> F["6. Spawn WS feeds (parallel)"]
-    F --> F1["Binance aggTrade"]
-    F --> F2["Coinbase ticker"]
-    F --> F3["Chainlink (Polymarket WS)"]
-    F1 & F2 & F3 --> G["7. Create shared budget"]
-    G --> H["8. Build StrategyEngine"]
-    H --> I["9. Authenticate SDK (if live)"]
-    I --> I2["10. Start Telegram bot"]
-    I2 --> J["11. Wait for all feeds > 0"]
+    D2 -->|yes| E["5. Create shared budget"]
+    E --> E2["6. Sync time with Polymarket"]
+    E2 --> F["7. Start Telegram bot"]
+    F --> F2["8. Start Notion worker + Polymarket resolver"]
+    F2 --> G["9. Spawn WS feeds (parallel)"]
+    G --> G1["Binance aggTrade"]
+    G --> G2["Coinbase ticker"]
+    G --> G3["Chainlink (Polymarket WS)"]
+    G1 & G2 & G3 --> H["10. Build StrategyEngine"]
+    H --> I["11. Authenticate SDK (if live)"]
+    I --> J["12. Wait for all feeds > 0"]
     J --> K["Market Rotation Loop"]
 ```
 
@@ -63,18 +65,23 @@ flowchart TD
     Create Market struct
     Set strike_price (chainlink) + strike_price_binance"]
 
-    S4["④ SPAWN POLYMARKET PRICE WS
+    S3a["④ NOTION SAVE
+    Save record with status=trading
+    Name = bot_name::market_slug"]
+
+    S4["⑤ SPAWN POLYMARKET PRICE WS
     Subscribe to bid/ask for both Up/Down tokens"]
 
-    S5["⑤ TICK LOOP
+    S5["⑥ TICK LOOP
     execute_tick() each iteration
     sleep(tick_interval_us) between ticks
     Tick rate configurable via bot_engine_ticks_per_second
     Exits when: budget < $1 OR market expired"]
 
-    S6["⑥ CLEANUP
+    S6["⑦ CLEANUP
     Clear engine state (trades, cooldowns)
     Abort Polymarket price WS task
+    Notion save status=completed
     Wait for market expiry + 1s"]
 
     S1 --> S2
@@ -82,8 +89,9 @@ flowchart TD
     S2a -->|no match| SKIP["Skip market, wait for expiry"]
     SKIP --> S6
     S2a -->|match found| S3
-    S2 -->|no| S4
-    S3 --> S4
+    S2 -->|no| S3a
+    S3 --> S3a
+    S3a --> S4
     S4 --> S5
     S5 -->|market expires or budget exhausted| S6
     S6 --> S1
@@ -229,6 +237,20 @@ The price WS updates incoming bid/ask directly:
 - Token must belong to current market (up or down)
 - Timestamp is converted to milliseconds (`timestamp * 1000`)
 
+## Polymarket Resolver
+
+Background task that runs every `notion_resolver_interval_secs` (default 60s):
+
+1. Queries Notion for records where `status = "completed"` AND `Name starts_with "bot_name::"`
+2. For each record, extracts the market slug from the Name
+3. Queries `gamma-api.polymarket.com/markets/slug/{slug}`
+4. Checks resolution conditions:
+   - `closed == true`
+   - `outcomePrices` contains a `"1"` (winner identified)
+   - `events[0].eventMetadata.priceToBeat` exists
+5. If resolved, updates the Notion record: `status → "resolved"`, `resolution → "Up"/"Down"`, `updated → now`
+6. Waits 1 second between Gamma API calls to respect rate limits
+
 ## Telegram Integration
 
 The Telegram bot runs on a **dedicated OS thread** with its own single-threaded tokio runtime, fully isolated from the main engine runtime. Only messages from the configured `bot_telegram_chat_id` are processed — all others are silently ignored.
@@ -241,15 +263,24 @@ The Telegram bot runs on a **dedicated OS thread** with its own single-threaded 
 ### Registered Commands
 - `/budget [amount]` — Query or set the bot's USDC budget at runtime
 
+## Notion Integration
+
+Non-blocking upsert to a Notion database via background worker:
+
+- **Save**: `notion.save(market_slug, properties)` queues a request via mpsc, returns immediately
+- **Name**: Auto-constructed as `bot_name::market_slug`
+- **Create**: Sets `Name`, `created`, `updated`, `market_url` (Polymarket link), and caller-provided properties
+- **Update**: Sets only `updated` and caller-provided properties
+- **Resolution**: Handled by the Polymarket resolver (updates `status` and `resolution`)
+
 ## Config Structure
 
 Flat TOML file with prefixed keys — no nested sections:
 
 ```toml
 # Security
-truncate_secret_files = true              # Empty secret files after reading (default: true)
-bot_polygon_private_key_file = ".key"     # Polygon wallet key file (missing = PAPER mode)
-bot_telegram_bot_token_file = ".tg-token" # Telegram bot token file (required)
+secrets_file = "secrets.toml"            # Path to secrets file
+truncate_secrets_file = true              # Empty secrets file after reading (default: true)
 
 # Bot
 bot_name = "bono"                         # Bot instance name (required)
@@ -257,6 +288,10 @@ bot_initial_budget = 4.00                 # USDC budget per instance
 bot_telegram_chat_id = 8289100643         # Owner's Telegram chat ID (required)
 bot_worker_threads = 2                    # Tokio runtime worker threads (1–16)
 bot_engine_ticks_per_second = 1000        # Trading loop tick rate
+
+# Notion
+notion_database_id = ""                   # Notion database ID (empty = disabled)
+notion_resolver_interval_secs = 60        # Resolver check interval
 
 # Engine
 engine_strategy = "bono"                  # Trading strategy: bono, konzerva (required)
@@ -269,7 +304,7 @@ market_resolve_strike_price = true        # Wait for strike before trading
 # Logger
 logger_level = "info"                     # error/warn/info/debug/trace
 
-# Feeds
+# Integrations (Feeds)
 # feeds_binance_history_secs = 300        # Rolling history window (default: interval * 60)
 # feeds_chainlink_history_secs = 300
 ```
