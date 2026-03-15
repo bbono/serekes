@@ -1,101 +1,105 @@
-# ─── Environment ──────────────────────────────────────────────────────────────
+# ─── Security ────────────────────────────────────────────────────────────────
 
-[environment]
-# Whether the bot runs in development mode.
+# Whether to empty secret files (polygon private key, telegram bot token)
+# after reading them at startup, so secrets do not remain on disk.
+# Set to false during development to avoid re-creating the files each run.
 # Default: true
-dev = true
-
-# ─── Bot ─────────────────────────────────────────────────────────────
-
-[bot]
-# Unique name for this bot instance. Used in logs and alerts to identify
-# which bot produced the output. Required — bot will not start without it.
-# No default.
-name = "bono"
+truncate_secret_files = false
 
 # Path to a file containing the Polygon wallet private key (hex string).
-# If the file exists and contains a valid key → bot runs in LIVE mode (real orders).
-# If the file is missing or empty → bot runs in PAPER mode (simulated fills).
+# If the file exists and contains a valid key, the bot runs in LIVE mode
+# (real on-chain orders on Polymarket). If the file is missing or empty,
+# the bot runs in PAPER mode (simulated fills, no real trades).
 # Default: ".key"
-key_file = ".key"
-
-# Number of tokio runtime worker threads.
-# More threads help under heavy WebSocket load; fewer threads save CPU.
-# Range: 1–16
-# Default: 2
-worker_threads = 3
-
-# How many times per second the engine trading loop ticks (calls execute_tick).
-# Higher = more responsive but higher CPU. 1000 = once per ms, 20 = once per 50ms.
-# Default: 1000
-engine_ticks_per_second = 1000
-
-# Starting budget in USDC for this bot instance.
-# Default: 0.00
-initial_budget = 4.00
+bot_polygon_private_key_file = ".key"
 
 # Path to a file containing the Telegram Bot API token from @BotFather.
-# If the file is missing or empty, Telegram is disabled.
+# The bot uses Telegram for sending trade notifications and accepting
+# commands (/budget). Required — bot will not start if the file is
+# missing or empty.
 # Default: ".tg-token"
-telegram_bot_token_file = ".tg-token"
+bot_telegram_bot_token_file = ".tg-token"
 
-# Your Telegram chat ID. The bot sends notifications here and only
-# responds to commands from this chat. Use @userinfobot to find yours.
-telegram_chat_id = 8289100643
+# ─── Bot ─────────────────────────────────────────────────────────────────────
 
-# ─── Market ───────────────────────────────────────────────────────────────────
+# Unique name for this bot instance. Used in logs and Telegram alerts
+# to identify which bot produced the output.
+# Required — bot will not start without it. No default.
+bot_name = "bono"
 
-[market]
+# Starting budget in USDC for this bot instance. This is the amount the
+# bot is allowed to use for placing orders. Can be updated at runtime
+# via the /budget Telegram command.
+# Default: 0.00
+bot_initial_budget = 4.00
+
+# Your personal Telegram chat ID. The bot sends all notifications to this
+# chat and only processes commands received from it. Messages from any
+# other chat are silently ignored. Use @userinfobot to find your chat ID.
+# Required — bot will not start without it. No default.
+bot_telegram_chat_id = 8289100643
+
+# Number of tokio runtime worker threads. More threads help under heavy
+# WebSocket load (multiple price feeds + Polymarket); fewer save CPU.
+# Range: 1–16
+# Default: 2
+bot_worker_threads = 3
+
+# How many times per second the engine trading loop ticks (calls execute_tick).
+# Higher values = more responsive to price changes but higher CPU usage.
+# 1000 = once per millisecond, 20 = once per 50ms.
+# Default: 1000
+bot_engine_ticks_per_second = 1000
+
+# ─── Engine ──────────────────────────────────────────────────────────────────
+
+# Trading strategy to use. Each strategy implements different logic for
+# deciding when, in which direction, and at what price to place orders.
+# Supported: "bono", "konzerva"
+# Required — bot will not start without it. No default.
+engine_strategy = "bono"
+
+# ─── Market ──────────────────────────────────────────────────────────────────
+
 # Which asset's Up/Down prediction markets to trade on Polymarket.
 # Also determines the Binance and Coinbase price feed symbols
-# (e.g. "btc" → BTCUSDT on Binance, BTC-USD on Coinbase).
+# (e.g. "btc" -> BTCUSDT on Binance, BTC-USD on Coinbase).
 # Supported: "btc", "eth", "sol", "xrp"
 # Default: "btc"
-asset = "btc"
+market_asset = "btc"
 
 # Candle interval in minutes. Determines which Polymarket Up/Down market
 # the bot discovers (e.g. btc-updown-5m-*) and the Binance kline interval
 # used to fetch the strike price.
 # Supported: 5, 15
 # Default: 5
-interval_minutes = 5
+market_interval_minutes = 5
 
 # Whether to resolve the strike price from Chainlink/Binance history before
 # trading a market. When true, the bot waits for a matching price in the
 # history buffers; if no strike is found, the market is skipped.
 # Set to false for strategies that don't need a strike price.
 # Default: true
-resolve_strike_price = false
+market_resolve_strike_price = false
 
-# ─── Logger ────────────────────────────────────────────────────────────────────
+# ─── Logger ──────────────────────────────────────────────────────────────────
 
-[logger]
-# Log level filter using env_logger syntax. A single global level, or
-# comma-separated with per-module overrides.
+# Log level filter using env_logger syntax. Accepts a single global level
+# or comma-separated per-module overrides.
 # Levels: "error", "warn", "info", "debug", "trace"
 # Modules: serekes::bot, serekes::engine, serekes::strategy::bono
 # Examples:
-#   "info"                                  — everything at info
-#   "warn,serekes::engine=debug"            — engine at debug, rest at warn
-#   "info,serekes::bot=warn"                — bot quieter, rest at info
+#   "info"                       — everything at info
+#   "warn,serekes::engine=debug" — engine at debug, rest at warn
+#   "info,serekes::bot=warn"     — bot quieter, rest at info
 # Default: "info"
-level = "info"
+logger_level = "info"
 
-# ─── Feeds ─────────────────────────────────────────────────────────────────────
+# ─── Feeds ───────────────────────────────────────────────────────────────────
 
-[feeds]
 # Price history buffer sizes in seconds. The bot keeps a rolling window
 # of recent prices for each feed. Entries older than the window are evicted.
 # Strategies can access these histories via TickContext for lookback analysis.
-# When not set, each defaults to the market window (interval_minutes * 60).
-# binance_history_secs = 300
-# chainlink_history_secs = 300
-
-# ─── Engine ───────────────────────────────────────────────────────────────────
-
-[engine]
-# Trading strategy to use. Each strategy implements different logic for
-# deciding when and how to place orders. Required — bot will not start without it.
-# Supported: "bono", "konzerva"
-# No default.
-strategy = "bono"
+# When not set, each defaults to the market window (market_interval_minutes * 60).
+# feeds_binance_history_secs = 300
+# feeds_chainlink_history_secs = 300

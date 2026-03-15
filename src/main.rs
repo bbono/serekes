@@ -31,10 +31,10 @@ fn main() {
         .expect("Failed to install rustls crypto provider");
 
     let config = AppConfig::load("config.toml");
-    common::logger::init(&config.bot.name, &config.logger);
+    common::logger::init(&config.bot_name, &config.logger_level);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.bot.worker_threads)
+        .worker_threads(config.bot_worker_threads)
         .enable_all()
         .build()
         .expect("Failed to build tokio runtime");
@@ -44,11 +44,10 @@ fn main() {
 
 async fn async_main(config: AppConfig) {
 
-    let market_asset = config.market.asset.to_lowercase();
-    let truncate = !config.environment.is_dev();
-    let (private_key, tg_token) = config.bot.load_secrets(truncate);
+    let market_asset = config.market_asset.to_lowercase();
+    let (private_key, tg_token) = config.load_secrets();
     if tg_token.is_none() {
-        error!("Telegram bot token file '{}' is missing or empty", config.bot.telegram_bot_token_file);
+        error!("Telegram bot token file '{}' is missing or empty", config.bot_telegram_bot_token_file);
         std::process::exit(1);
     }
     let paper_mode = private_key.is_none();
@@ -65,14 +64,14 @@ async fn async_main(config: AppConfig) {
     let shared_market: Arc<Mutex<Option<Arc<Market>>>> = Arc::new(Mutex::new(None));
 
     // --- Spawn all price feed WebSockets ---
-    let market_window_secs = (config.market.interval_minutes * 60) as i64;
+    let market_window_secs = (config.market_interval_minutes * 60) as i64;
 
     let binance_history: Arc<Mutex<VecDeque<(f64, i64)>>> = Arc::new(Mutex::new(VecDeque::new()));
     spawn_binance_ws(
         &market_asset,
         binance_tx,
         binance_history.clone(),
-        config.feeds.binance_history_ms(market_window_secs),
+        config.feeds_binance_history_ms(market_window_secs),
     );
     spawn_coinbase_ws(&market_asset, coinbase_tx);
 
@@ -81,16 +80,16 @@ async fn async_main(config: AppConfig) {
         market_asset.clone(),
         chainlink_tx,
         chainlink_history.clone(),
-        config.feeds.chainlink_history_ms(market_window_secs),
+        config.feeds_chainlink_history_ms(market_window_secs),
     );
 
     // --- Budget (shared, safe to update at runtime) ---
-    let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot.initial_budget));
+    let budget: Arc<Mutex<f64>> = Arc::new(Mutex::new(config.bot_initial_budget));
 
     // --- Strategy engine ---
     let mut engine = StrategyEngine::new(
         paper_mode,
-        config.engine.clone(),
+        &config.engine_strategy,
         binance_rx,
         coinbase_rx,
         chainlink_rx,
@@ -111,16 +110,16 @@ async fn async_main(config: AppConfig) {
     let mut cmds = telegram::commands::Commands::new();
     let budget_ref = budget.clone();
     cmds.register("budget", "Budget", move |args| bot_budget_command(&budget_ref, args));
-    let tg = telegram::spawn(tg_token, config.bot.telegram_chat_id, cmds.build());
-    tg.send(format!("{} started.", config.bot.name));
+    let tg = telegram::spawn(tg_token, config.bot_telegram_chat_id, cmds.build());
+    tg.send(format!("{} started.", config.bot_name));
 
     // --- Graceful shutdown ---
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
-    let interval_minutes = config.market.interval_minutes;
+    let interval_minutes = config.market_interval_minutes;
 
-    let resolve_strike_price = config.market.resolve_strike_price;
+    let resolve_strike_price = config.market_resolve_strike_price;
     let signal_name = tokio::select! {
         _ = run_bot_loop(
             &mut engine,
@@ -130,7 +129,7 @@ async fn async_main(config: AppConfig) {
             &shared_market,
             &chainlink_history,
             &binance_history,
-            config.bot.tick_interval_us(),
+            config.tick_interval_us(),
         ) => None,
         _ = tokio::signal::ctrl_c() => Some("SIGINT"),
         _ = sigterm.recv() => Some("SIGTERM"),

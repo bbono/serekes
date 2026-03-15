@@ -1,6 +1,5 @@
 mod order;
 
-use crate::common::config::EngineConfig;
 use crate::strategy::Strategy;
 use crate::strategy::{BonoStrategy, KonzervaStrategy};
 use crate::types::{Market, TickContext, TickResult, Trade};
@@ -50,7 +49,7 @@ pub struct StrategyEngine {
 impl StrategyEngine {
     pub fn new(
         paper_mode: bool,
-        config: EngineConfig,
+        strategy_name: &str,
         binance_rx: watch::Receiver<(f64, i64)>,
         coinbase_rx: watch::Receiver<(f64, i64)>,
         chainlink_rx: watch::Receiver<(f64, i64)>,
@@ -59,7 +58,7 @@ impl StrategyEngine {
         chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
         budget: Arc<Mutex<f64>>,
     ) -> Self {
-        let strategy = create_strategy(&config.strategy);
+        let strategy = create_strategy(strategy_name);
         Self {
             strategy,
             paper_mode,
