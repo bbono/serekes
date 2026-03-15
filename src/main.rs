@@ -214,11 +214,21 @@ async fn run_bot_loop(
         notion.save(&market.slug, HashMap::from([("status", "trading")]));
 
         let price_handle = connect_poly_price_ws(shared_market, &market).await;
-        trade_market(engine, &market, tick_interval_us).await;
+        let summary = trade_market(engine, &market, tick_interval_us).await;
         engine.clear_state();
         price_handle.abort();
 
-        notion.save(&market.slug, HashMap::from([("status", "completed")]));
+        let trades_str = summary.trades.to_string();
+        let cost_str = format!("{:.2}", summary.cost);
+        let shares_up_str = format!("{:.4}", summary.shares_up);
+        let shares_down_str = format!("{:.4}", summary.shares_down);
+        notion.save(&market.slug, HashMap::from([
+            ("status", "completed"),
+            ("trades", trades_str.as_str()),
+            ("cost", cost_str.as_str()),
+            ("shares_up", shares_up_str.as_str()),
+            ("shares_down", shares_down_str.as_str()),
+        ]));
         // Wait for another market
         let remaining_ms = market.expires_at_ms.saturating_sub(common::time::now_ms());
         if remaining_ms > 0 {
@@ -231,33 +241,46 @@ async fn run_bot_loop(
 // Market tick loop
 // ---------------------------------------------------------------------------
 
-async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interval_us: u64) {
+struct TradeSummary {
+    trades: u32,
+    cost: f64,
+    shares_up: f64,
+    shares_down: f64,
+}
+
+async fn trade_market(engine: &mut StrategyEngine, market: &Market, tick_interval_us: u64) -> TradeSummary {
     debug!(
         "Trading market {} (expires in {:.0}s)",
         market.slug,
         market.time_to_expire_ms() as f64 / 1000.0
     );
-    let mut trade_count = 0usize;
+    let mut last_result = None;
     loop {
         if common::time::now_ms() > market.expires_at_ms + 1000 {
             break;
         }
-        // Execute engine tick
         let result = engine.execute_tick().await;
-        if result.traded {
-            trade_count += 1;
-        }
-
-        // If Engine completed with market processing then exit
-        if result.completed {
+        let completed = result.completed;
+        last_result = Some(result);
+        if completed {
             break;
         }
         tokio::time::sleep(Duration::from_micros(tick_interval_us)).await;
     }
-    debug!(
-        "Trading completed. Market {} ({} trades)",
-        market.slug, trade_count
-    );
+
+    let mut summary = TradeSummary { trades: 0, cost: 0.0, shares_up: 0.0, shares_down: 0.0 };
+    if let Some(result) = last_result {
+        for trade in &result.trades {
+            summary.trades += 1;
+            summary.cost += trade.intent.cost();
+            match trade.direction {
+                types::TokenDirection::Up => summary.shares_up += trade.size,
+                types::TokenDirection::Down => summary.shares_down += trade.size,
+            }
+        }
+    }
+    debug!("Trading completed. Market {} ({} trades)", market.slug, summary.trades);
+    summary
 }
 
 // ---------------------------------------------------------------------------

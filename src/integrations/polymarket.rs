@@ -358,13 +358,6 @@ impl Resolver {
             return None;
         }
 
-        let price_to_beat = data
-            .pointer("/events/0/eventMetadata/priceToBeat")
-            .and_then(|v| v.as_f64());
-        if price_to_beat.is_none() {
-            return None;
-        }
-
         let outcomes_str = data["outcomes"].as_str()?;
         let prices_str = data["outcomePrices"].as_str()?;
 
