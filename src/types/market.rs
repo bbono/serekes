@@ -60,4 +60,40 @@ impl Market {
     pub fn time_from_started_ms(&self) -> i64 {
         crate::common::time::now_ms().saturating_sub(self.started_at_ms)
     }
+
+    /// Compute the time bucket start in ms for a given interval.
+    pub fn bucket_start_ms(now_ms: i64, interval_minutes: u32) -> i64 {
+        let interval_ms = (interval_minutes as i64) * 60_000;
+        (now_ms / interval_ms) * interval_ms
+    }
+
+    /// Build a market slug from asset, interval, and bucket start timestamp.
+    pub fn slug_for(asset: &str, interval_minutes: u32, bucket_start_ms: i64) -> String {
+        let kline_interval = if interval_minutes >= 60 {
+            format!("{}h", interval_minutes / 60)
+        } else {
+            format!("{}m", interval_minutes)
+        };
+        let ts_secs = bucket_start_ms / 1000;
+        format!("{}-updown-{}-{}", asset, kline_interval, ts_secs)
+    }
+
+    /// Return candidate slugs to try for market discovery (current bucket, then next).
+    pub fn candidate_slugs(asset: &str, interval_minutes: u32, now_ms: i64) -> Vec<String> {
+        let interval_ms = (interval_minutes as i64) * 60_000;
+        let bucket = Self::bucket_start_ms(now_ms, interval_minutes);
+        vec![
+            Self::slug_for(asset, interval_minutes, bucket),
+            Self::slug_for(asset, interval_minutes, bucket + interval_ms),
+        ]
+    }
+
+    /// Compute PnL from a market resolution outcome.
+    pub fn compute_pnl(outcome: &str, shares_up: f64, shares_down: f64, cost: f64) -> f64 {
+        match outcome.to_lowercase().as_str() {
+            "up" => shares_up - cost,
+            "down" => shares_down - cost,
+            _ => -cost,
+        }
+    }
 }
