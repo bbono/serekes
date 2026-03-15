@@ -101,12 +101,13 @@ async fn async_main(config: AppConfig) {
     let market_price = Arc::new(adapters::polymarket_price::PolymarketPriceAdapter::new());
 
     // --- Exchange adapter (order signing + submission) ---
-    let exchange = Arc::new(
+    let exchange: Arc<dyn crate::ports::ExchangePort> = Arc::new(
         adapters::polymarket_order::PolymarketOrderAdapter::new(
             secrets.polygon_private_key.as_deref(),
         )
         .await,
     );
+    let exchange = Arc::new(adapters::rate_limiter::RateLimitedExchange::new(exchange));
 
     // --- Market discovery adapter ---
     let discovery = Arc::new(adapters::polymarket_discovery::GammaDiscoveryAdapter::new(

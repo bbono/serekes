@@ -82,7 +82,7 @@ market_interval_minutes = 5
 # history buffers; if no strike is found, the market is skipped.
 # Set to false for strategies that don't need a strike price.
 # Default: true
-market_resolve_strike_price = false
+market_resolve_strike_price = true
 
 # ─── Logger ──────────────────────────────────────────────────────────────────
 

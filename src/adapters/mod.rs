@@ -6,6 +6,7 @@ pub mod notion;
 pub mod polymarket_discovery;
 pub mod polymarket_order;
 pub mod polymarket_price;
+pub mod rate_limiter;
 pub mod resolver;
 pub mod telegram;
 
