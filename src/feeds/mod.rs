@@ -1,13 +1,11 @@
 mod binance;
 mod chainlink;
 mod coinbase;
-mod deribit;
 pub mod polymarket;
 
 pub use binance::spawn_binance_ws;
 pub use chainlink::spawn_chainlink_ws;
 pub use coinbase::spawn_coinbase_ws;
-pub use deribit::spawn_deribit_dvol_ws;
 pub use polymarket::{connect_poly_price_ws, discover_market, resolve_strike_prices};
 
 use std::collections::VecDeque;

@@ -26,11 +26,6 @@ pub struct TickContext {
     /// Unix ms when chainlink_price was last updated.
     pub chainlink_ts: i64,
 
-    /// Deribit implied volatility index (DVOL).
-    pub dvol: f64,
-    /// Unix ms when dvol was last updated.
-    pub dvol_ts: i64,
-
     /// Current unix ms, adjusted for Polymarket server time offset.
     pub polymarket_now_ms: i64,
 
@@ -46,9 +41,6 @@ pub struct TickContext {
     /// Recent chainlink price history: (price, timestamp_ms), oldest first.
     /// Lock only when needed — avoid holding across await points.
     pub chainlink_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
-
-    /// Recent DVOL history: (volatility, timestamp_ms), oldest first.
-    pub dvol_history: Arc<Mutex<VecDeque<(f64, i64)>>>,
 
     /// All trades placed by the engine during this market, oldest first.
     pub trades: Vec<Trade>,
